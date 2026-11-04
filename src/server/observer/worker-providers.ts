@@ -31,7 +31,7 @@ export function claudeAgents(settings: ObserverSettings, model: string): object 
 }
 
 export const disabledCodexFeatures = ['hooks','plugins','remote_plugin','plugin_discovery_prefetch','plugin_sharing','apps','enable_mcp_apps','browser_use','browser_use_external','computer_use','image_generation','view_image','multi_agent_v2','multi_agent_v2_dynamic_tools','shell_tool','unified_exec','code_mode','code_mode_host','code_mode_only','code_mode_prewarm','sleep_tool','goals','memories','workspace_dependencies','skill_search','skill_mcp_dependency_install','tool_suggest','default_mode_request_user_input','request_permissions_tool','in_app_local_automation','daemon_auto_start','context_management','current_time_reminder'];
-export interface ProviderRuntime { provider: Provider; executable: string; prefix: string[]; version: string | null; help: string; features: Set<string>; mcpNames: string[]; models: Map<string,string[]>; reason?: string }
+export interface ProviderRuntime { provider: Provider; executable: string; prefix: string[]; version: string | null; help: string; features: Set<string>; mcpNames: string[]; models: Map<string,string[]>; modelDefinitions?: Map<string,Record<string,unknown>>; reason?: string }
 
 export async function executableFor(provider: Provider, env: NodeJS.ProcessEnv, platform = process.platform): Promise<{ executable: string; prefix: string[] }> {
   try { const resolved = await resolveExecutable(provider, [], { env, platform }); return { executable: resolved.executable, prefix: resolved.args }; }
@@ -48,17 +48,35 @@ export function modelCatalog(value: unknown): Map<string,string[]> {
   }
   return models;
 }
-export async function cachedCodexModels(env: NodeJS.ProcessEnv): Promise<Map<string,string[]>> {
+export function codexModelDefinitions(value: unknown): Map<string,Record<string,unknown>> {
+  const supported = modelCatalog(value);
+  const list = Array.isArray(value) ? value : (value as {models?: unknown})?.models;
+  return new Map(Array.isArray(list) ? list.filter(entry => supported.has(entry?.slug)).map(entry => [entry.slug,entry]) : []);
+}
+export async function cachedCodexDefinitions(env: NodeJS.ProcessEnv): Promise<Map<string,Record<string,unknown>>> {
   const root = env.CODEX_HOME || path.join(env.USERPROFILE || os.homedir(),'.codex');
   for (const filename of ['models_cache.json','models_cache.codex_work_desktop.json']) {
-    try { const file = path.join(root,filename); const stat = await fs.stat(file); if (stat.size > 8 * 1024 * 1024) continue; const models = modelCatalog(JSON.parse(await fs.readFile(file,'utf8'))); if (models.size) return models; }
+    try { const file = path.join(root,filename); const stat = await fs.stat(file); if (stat.size > 8 * 1024 * 1024) continue; const models = codexModelDefinitions(JSON.parse(await fs.readFile(file,'utf8'))); if (models.size) return models; }
     catch (error) { if (!['ENOENT','EACCES','EPERM'].includes((error as NodeJS.ErrnoException).code || '') && !(error instanceof SyntaxError)) throw error; }
   }
   return new Map();
 }
+export async function cachedCodexModels(env: NodeJS.ProcessEnv): Promise<Map<string,string[]>> {
+  return modelCatalog({models:[...(await cachedCodexDefinitions(env)).values()]});
+}
+export function codexDelegationCatalog(runtime: ProviderRuntime, model: string): object {
+  const definition = runtime.modelDefinitions?.get(model);
+  if (!definition) throw new ObserverWorkerError('unavailable','The selected Codex model has no native catalog definition for isolated subagent delegation. Capability discovery will retry.');
+  // In Codex 0.166 model metadata overrides disabled feature flags. Select the
+  // native V1/direct transport explicitly for this worker, whose JSONL protocol
+  // exposes completed child replies. Retain the model's other native metadata.
+  // No user catalog, configuration or working session is modified.
+  return {models:[{...definition,tool_mode:'direct',multi_agent_version:'v1',supports_search_tool:false}]};
+}
 function tomlString(value: string): string { return JSON.stringify(value); }
 export function codexArguments(runtime: ProviderRuntime, settings: ObserverSettings, model: string, schemaPath: string, outputPath: string, cwd: string): string[] {
   const config = ['approval_policy="never"','web_search="disabled"','project_doc_max_bytes=0','notify=[]','mcp_servers={}','apps._default.enabled=false','skills.include_instructions=false','model_instructions_file='+tomlString(path.join(cwd,'observer-instructions.md')),'developer_instructions='+tomlString(coordinatorInstructions),'model_reasoning_effort='+tomlString(settings.effort),'agents.enabled=true','agents.max_concurrent_threads_per_session=1','agents.max_depth=1','agents.default_subagent_model='+tomlString(model),'agents.default_subagent_reasoning_effort='+tomlString(settings.effort),'agents.eta_assessor.description="Answer How much remaining time from the supplied evidence only"','agents.eta_assessor.config_file='+tomlString(path.join(cwd,'eta-assessor.toml'))];
+  config.push('model_catalog_json='+tomlString(path.join(cwd,'delegation-models.json')));
   // Names here have been validated in exec's actual ignored-user-config view.
   // The CLI dotted-path parser does not interpret TOML quoting around a path segment.
   for (const name of runtime.mcpNames) {
@@ -109,6 +127,7 @@ export function parseCodexResult(result: ObserverProcessResult, _finalMessage: s
   if (result.code !== 0) throw providerFailure('codex',result);
   const children = new Set<string>();
   const completed = new Map<string,string>();
+  const observedItems = new Set<string>(), nativeErrors: string[] = [];
   let root: string | null = null, reportedUsage: Usage | null = null, rejected: ObserverWorkerError | null = null, failed = false;
   const passiveItems = new Set(['agent_message','reasoning','todo_list','error']);
   for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
@@ -119,6 +138,11 @@ export function parseCodexResult(result: ObserverProcessResult, _finalMessage: s
     if (event.type === 'error' || event.type === 'turn.failed') failed = true;
     if (!['item.started','item.updated','item.completed'].includes(event.type)) continue;
     const item = event.item;
+    if (typeof item?.type === 'string' && /^[a-z_]{1,80}$/.test(item.type)) observedItems.add(item.type);
+    if (item?.type === 'error' && typeof item.message === 'string') {
+      const diagnostic = safeProviderDiagnostic(`Error: ${item.message}`);
+      if (diagnostic && nativeErrors.length < 3) nativeErrors.push(diagnostic);
+    }
     if (item?.type !== 'collab_tool_call') {
       if (!passiveItems.has(item?.type)) rejected ??= new ObserverWorkerError('provider-error','ETA coordinator attempted work outside subagent delegation.');
       continue;
@@ -145,7 +169,7 @@ export function parseCodexResult(result: ObserverProcessResult, _finalMessage: s
     if (rejected) throw rejected;
     if (failed) throw providerFailure('codex',result);
     const id = [...children][0], response = id ? completed.get(id) : null;
-    if (!response) throw new ObserverWorkerError('invalid-output','No completed CLI subagent reply was returned. A coordinator estimate is not accepted.');
+    if (!response) throw new ObserverWorkerError('invalid-output',`No completed CLI subagent reply was returned (${children.size} spawned, ${completed.size} completed; native items: ${[...observedItems].sort().join(', ') || 'none'}).${nativeErrors.length ? ` ${nativeErrors.join(' ')}` : ''} A coordinator estimate is not accepted.`);
     // The native completed child message is authoritative. Never substitute the parent's final file.
     return { content: validateAssessment(jsonText(response),evidenceIds), usage: reportedUsage, model, delegation: delegated(id) };
   } catch (error) { if (error instanceof ObserverWorkerError) error.usage = reportedUsage; throw error; }

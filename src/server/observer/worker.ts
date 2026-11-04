@@ -8,7 +8,7 @@ import { defaultObserverSettings, type ObserverCapabilities, type ObserverInput,
 import { redact } from '../privacy.js';
 import { assessmentSchema } from './schema.js';
 import { createObserverProcessRunner, ObserverWorkerError, type ObserverProcessRunner } from './process.js';
-import { cachedCodexModels, claudeArguments, codexArguments, executableFor, modelCatalog, assessorInstructions, coordinatorInstructions, codexAssessorConfig, claudeAgents, etaQuestion, parseClaudeResult, parseCodexResult, safeProviderDiagnostic, type ProviderRuntime } from './worker-providers.js';
+import { cachedCodexDefinitions, codexModelDefinitions, codexDelegationCatalog, claudeArguments, codexArguments, executableFor, modelCatalog, assessorInstructions, coordinatorInstructions, codexAssessorConfig, claudeAgents, etaQuestion, parseClaudeResult, parseCodexResult, safeProviderDiagnostic, type ProviderRuntime } from './worker-providers.js';
 export { ObserverWorkerError } from './process.js';
 
 export interface ObserverWorkerOptions { runner?: ObserverProcessRunner; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform }
@@ -29,10 +29,11 @@ export function createObserverWorker(workspace: string, options: ObserverWorkerO
   const runtimes = new Map<Provider,ProviderRuntime>(); let cached: ObserverCapabilities[] | null = null;let closed = false; let discovery: Promise<ObserverCapabilities[]> | null = null;
   const retryAt=new Map<Provider,number>(),probeFailures=new Map<Provider,number>(),confirmedUnsupported=new Set<Provider>();
   const prepare = async () => { await fs.mkdir(cwd,{recursive:true,mode:0o700}); };
-  async function prepareCodexInstructions(directory: string) {
+  async function prepareCodexInstructions(directory: string, runtime: ProviderRuntime, model: string) {
     await fs.writeFile(path.join(directory,'observer-instructions.md'),coordinatorInstructions,{mode:0o600,flag:'wx'});
     await fs.writeFile(path.join(directory,'assessor-instructions.md'),assessorInstructions,{mode:0o600,flag:'wx'});
     await fs.writeFile(path.join(directory,'eta-assessor.toml'),codexAssessorConfig(directory),{mode:0o600,flag:'wx'});
+    await fs.writeFile(path.join(directory,'delegation-models.json'),JSON.stringify(codexDelegationCatalog(runtime,model)),{mode:0o600,flag:'wx'});
   }
   async function probe(provider: Provider): Promise<ObserverCapabilities> {
     confirmedUnsupported.delete(provider);
@@ -60,14 +61,15 @@ export function createObserverWorker(workspace: string, options: ObserverWorkerO
         if (!Array.isArray(servers) || servers.some(s => !s || typeof s.name !== 'string')) throw new ObserverWorkerError('unavailable','Codex MCP listing returned an unsupported schema.');
         const candidates = servers.map(s => s.name);
         if (candidates.length > 64 || candidates.some(name => !/^[A-Za-z0-9_-]{1,200}$/.test(name))) throw new ObserverWorkerError('unavailable','A Codex MCP name cannot be safely represented in the isolated configuration interface.');
-        runtime.models = await cachedCodexModels(env);
-        if (!runtime.models.size) { const models = await runner.run({...base,...command,args:[...command.prefix,'debug','models','--bundled']}); if (models.code === 0) { try { runtime.models = modelCatalog(JSON.parse(models.stdout)); } catch { throw new ObserverWorkerError('unavailable','The bundled Codex model catalog is invalid.'); } } }
+        runtime.modelDefinitions = await cachedCodexDefinitions(env);
+        if (!runtime.modelDefinitions.size) { const models = await runner.run({...base,...command,args:[...command.prefix,'debug','models','--bundled']}); if (models.code === 0) { try { runtime.modelDefinitions = codexModelDefinitions(JSON.parse(models.stdout)); } catch { throw new ObserverWorkerError('unavailable','The bundled Codex model catalog is invalid.'); } } }
+        runtime.models = modelCatalog({models:[...runtime.modelDefinitions.values()]});
         if (!runtime.models.size) throw new ObserverWorkerError('unavailable','No supported model/effort catalog is available from the installed Codex CLI.');
         const model = runtime.models.has('gpt-6.1-sol') ? 'gpt-6.1-sol' : [...runtime.models.keys()][0];
         const probeSettings = {...defaultObserverSettings,model,effort:runtime.models.get(model)![0]};
         const probeDirectory = await fs.mkdtemp(path.join(cwd,'config-probe-'));
         try {
-          await prepareCodexInstructions(probeDirectory);
+          await prepareCodexInstructions(probeDirectory,runtime,model);
           const check = async (names: string[]) => runner.run({...base,...command,args:codexArguments({...runtime,mcpNames:names},probeSettings,model,path.join(probeDirectory,'schema.json'),path.join(probeDirectory,'output.json'),probeDirectory),input:''});
           const configValid = (response: {code:number|null;stdout:string;stderr:string}) => response.code === 1 && !response.stdout.trim() && /(?:^|\r?\n)No prompt provided via stdin\.\s*(?:$|\r?\n)/.test(response.stderr);
           // Source-verified exec order: configuration loads before the forced empty stdin guard;
@@ -127,7 +129,7 @@ ${data}
         await fs.writeFile(schemaPath,JSON.stringify(assessmentSchema),{mode:0o600,flag:'wx'});
         // Replace the coding-agent base instructions for this isolated assessment
         // only; never edit the user's CLI configuration or monitored conversation.
-        if (settings.provider === 'codex') await prepareCodexInstructions(directory);
+        if (settings.provider === 'codex') await prepareCodexInstructions(directory,runtime,model);
         else await fs.writeFile(path.join(directory,'agents.json'),JSON.stringify(claudeAgents(settings,model)),{mode:0o600,flag:'wx'});
         const args = settings.provider === 'codex' ? codexArguments(runtime,settings,model,schemaPath,outputPath,directory) : claudeArguments(runtime,settings,model,assessmentSchema,directory);
         const result = await runner.run({executable:runtime.executable,args,cwd:directory,env,input:prompt,timeoutMs:settings.timeoutSeconds*1000,signal,maxOutputBytes:4*1024*1024});
