@@ -93,7 +93,7 @@ Past verification procedures and results are recorded in [verification](docs/VER
 - Separate context occupancy, current-turn consumption, lifetime consumption, and shared account allowance windows. Unknown metrics remain unavailable. Expired allowance snapshots remain stale until a fresh observation arrives.
 - Searchable local history, archived sessions, and provenance tooltips. Subagents are nested beneath their parent.
 - Source-aware runtime labels and visible subagent activity timestamps. A recent transcript is labeled activity evidence rather than verified Running. The optional **Activity** drawer contains the newest-first event timeline; it does not occupy the overview. Session tabs wrap within their space, with explicit access to additional sessions instead of an empty inner scrollbar.
-- The configured CLI agent asks an ETA subagent “How much remaining time” for the selected current task: objective, stage, remaining work, a time range, confidence, basis, blockers and evidence references. An initial rough estimate does not require historical samples. Conversation age is kept separate from current-task elapsed time.
+- The configured CLI agent asks an ETA subagent “How much remaining time” for the selected current task. The dashboard displays the subagent's duration or range without padding or widening it. Active tasks require an estimate from the subagent. A single duration stays a single value. Conversation age is kept separate from current-task elapsed time.
 
 ## Task observer and Timing & Progress
 

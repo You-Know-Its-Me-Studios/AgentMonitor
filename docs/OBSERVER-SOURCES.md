@@ -4,6 +4,8 @@ The configured ETA provider/model/effort launches a separate, bounded CLI coordi
 
 The existing scheduler still controls selection, interval, coalescing, concurrency, timeouts, backoff and superseded-task rejection. The dashboard does not send this question into the monitored working conversation, resume it, or take ownership of it. Evidence is assembled explicitly; a subagent is not assumed to inherit the monitored conversation.
 
+The assessor must provide its best finite estimate for active or blocked tasks. It is not instructed to widen uncertainty ranges. Equal numeric endpoints encode a single duration; differing endpoints encode a range it chose. Validation rejects missing estimates for active or blocked tasks; completed, idle and paused tasks have no remaining-work ETA. The overview and assessment details render equal endpoints once. Existing stored replies remain unchanged; the revised instructions apply to subsequent requests.
+
 ## Installed capabilities inspected
 
 Native help and version output were inspected for Codex **0.166.0** and Claude Code **2.1.318**. Codex’s matching versioned configuration schema and exec-event source establish the supported agent settings and completed-child message format. Claude’s official subagent and SDK documentation establish CLI agent definitions, Agent calls, `parent_tool_use_id` correlation and tool-result responses.
