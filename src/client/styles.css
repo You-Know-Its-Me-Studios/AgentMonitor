@@ -68,7 +68,7 @@ h1 { font-size: 25px; font-weight: 650; letter-spacing: -.45px; margin: 4px 0 8p
 .session-tab.codex > svg { color: #65e7a1ad; }
 .session-tab.claude > svg { color: #dfa981c4; }
 .tab-state { width: 5px; height: 5px; flex-shrink: 0; border-radius: 100%; background: #536275; margin-left: 3px; }
-.all-sessions { align-self: flex-start; display: flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; font-size: 10px; color: #acbacb; padding: 9px 10px; margin-top: 6px; background: #1b2533; border: 1px solid var(--border); border-radius: 6px; }
+.all-sessions { align-self: flex-start; display: flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; font-size: 10px; color: #acbacb; padding: 9px 10px; margin: 0 0 8px; background: #1b2533; border: 1px solid var(--border); border-radius: 6px; }
 .session-counts { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #7f8da2; padding: 14px 1px 17px; font-size: 10px; }
 .session-counts > span { display: flex; align-items: center; gap: 6px; }
 .session-counts .status-dot { width: 5px; height: 5px; }
