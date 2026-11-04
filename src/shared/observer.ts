@@ -24,6 +24,7 @@ export interface ObserverAssessment extends AssessmentContent {
   id: string; sessionId: string; taskId: string; taskRevision: number; requestRevision: number;
   assessedAt: string; evidenceThrough: string; provider: Provider; model: string;
   durationMs: number; usage: Usage | null;
+  delegation?: { question: string; requestId: string };
 }
 export interface ObserverFailure { code: 'authentication' | 'timeout' | 'invalid-output' | 'provider-error' | 'unavailable' | 'evidence-unavailable' | 'superseded'; message: string; at: string; provider?: Provider; source?: string }
 export interface ObserverSessionState {
@@ -44,7 +45,7 @@ export interface ObserverInput {
   collectedAt: string; runtime: string; collectionCondition: string;
   childSummary: string; measurements: string;
 }
-export interface WorkerResult { content: AssessmentContent; usage: Usage | null; model: string; durationMs: number }
+export interface WorkerResult { content: AssessmentContent; usage: Usage | null; model: string; durationMs: number; delegation?: { question: string; requestId: string } }
 export interface ObserverWorker {
   capabilities(): Promise<ObserverCapabilities[]>;
   run(input: ObserverInput, settings: ObserverSettings, signal?: AbortSignal): Promise<WorkerResult>;

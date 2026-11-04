@@ -84,6 +84,7 @@ function validateWorkerMetadata(result: WorkerResult, settings: ObserverSettings
   const invalid = (message: string): never => { throw Object.assign(new Error(message), { code: 'invalid-output' }); };
   if (!Number.isFinite(result.durationMs) || result.durationMs < 0 || result.durationMs > settings.timeoutSeconds * 1000 + 15000) invalid('Observer returned an invalid measured execution duration.');
   if (typeof result.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,127}$/.test(result.model)) invalid('Observer returned an invalid model identity.');
+  if (result.delegation?.question !== 'How much remaining time' || typeof result.delegation.requestId !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/.test(result.delegation.requestId)) invalid('No valid CLI subagent reply identity was returned.');
   if (result.usage !== null) {
     if (!result.usage || typeof result.usage !== 'object') invalid('Observer returned invalid usage metadata.');
     for (const field of Object.keys(emptyUsage()) as (keyof Usage)[]) { const value = result.usage[field]; if (value !== null && (!Number.isFinite(value) || typeof value !== 'number' || value < 0)) invalid(`Observer returned an invalid ${field} usage count.`); }
@@ -230,7 +231,7 @@ export class ObserverService extends EventEmitter {
         if (abort.signal.aborted || current?.id !== task.id || current.revision !== task.revision || this.data.revisions[session.id] !== requestRevision) return;
         const content = validateAssessment(result.content, input.evidence.map(e => e.id));
         const assessment: ObserverAssessment = { ...content, id: randomUUID(), sessionId: session.id, taskId: task.id, taskRevision: task.revision, requestRevision,
-          assessedAt: new Date().toISOString(), evidenceThrough: task.lastActivityAt, provider: settings.provider, model: result.model, durationMs: result.durationMs, usage: result.usage };
+          assessedAt: new Date().toISOString(), evidenceThrough: task.lastActivityAt, provider: settings.provider, model: result.model, durationMs: result.durationMs, usage: result.usage, delegation: result.delegation };
         state.assessment = sanitize(assessment); state.failure = null; this.failures.delete(session.id);
         this.store.writeState(`observer-assessment:${assessment.id}`, state.assessment);
       } catch (error) {
