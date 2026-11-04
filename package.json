@@ -1,0 +1,32 @@
+{
+  "name": "agent-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "npm run build && node --watch dist/server/main.js",
+    "dev:ui": "vite build --watch --configLoader native",
+    "start": "node dist/server/main.js",
+    "build": "vite build --configLoader native && tsc -p tsconfig.server.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --configLoader native",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "fastify": "https://registry.npmjs.org/fastify/-/fastify-5.12.7.tgz",
+    "react": "https://registry.npmjs.org/react/-/react-19.2.7.tgz",
+    "react-dom": "https://registry.npmjs.org/react-dom/-/react-dom-19.2.7.tgz"
+  },
+  "devDependencies": {
+    "@playwright/test": "https://registry.npmjs.org/@playwright/test/-/test-1.58.2.tgz",
+    "@types/node": "https://registry.npmjs.org/@types/node/-/node-22.20.5.tgz",
+    "@types/react": "https://registry.npmjs.org/@types/react/-/react-19.2.17.tgz",
+    "@types/react-dom": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz",
+    "typescript": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
+    "vite": "https://registry.npmjs.org/vite/-/vite-7.3.7.tgz",
+    "vitest": "https://registry.npmjs.org/vitest/-/vitest-3.2.7.tgz"
+  }
+}

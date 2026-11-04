@@ -1,0 +1,14 @@
+:root {
+  --background: #101722;
+  --panel: #1a2432;
+  --text: #e2eaf5;
+  --muted: #8192a9;
+  --border: #344154a1;
+  --green: #65e7a1;
+  --cyan: #5acbf2;
+  --purple: #aa8be9;
+  --amber: #f0c767;
+  --red: #f17e79;
+  --claude: #d6a17d;
+  --mono: 'Cascadia Code', 'Cascadia Mono', 'Consolas', monospace;
+}

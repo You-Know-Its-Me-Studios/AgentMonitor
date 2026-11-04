@@ -1,0 +1,191 @@
+import type { AdapterContext, AdapterResult, FileInfo, ProviderAdapter } from '../../shared/adapter.js';
+import { emptySession, metric, sessionKey, type Diagnostic, type Session } from '../../shared/types.js';
+import { claudeSession, cleanText, initialClaudeState, iso, reduceClaudeRecord, type ClaudeState } from './parser.js';
+
+interface ExternalSession { sessionId?: string; id?: string; cwd?: string; kind?: string; startedAt?: number; pid?: number; status?: string; waitingFor?: string; state?: string; name?: string }
+interface TranscriptFile { info: FileInfo; nativeId: string; parentNativeId: string | null }
+function diag(ctx:AdapterContext,code:string,message:string,level:Diagnostic['level']='info'):Diagnostic{return{provider:'claude',namespace:ctx.namespace,level,code,message,at:ctx.now};}
+function validExternal(value:unknown):value is ExternalSession {
+  if(!value||typeof value!=='object')return false;
+  const record=value as ExternalSession;
+  return (typeof record.sessionId==='string'||typeof record.id==='string')&&(record.pid===undefined||Number.isInteger(record.pid))&&(record.status===undefined||typeof record.status==='string');
+}
+export function parseClaudeListing(text:string):ExternalSession[] {
+  const result=JSON.parse(text);if(!Array.isArray(result)||!result.every(value=>value&&typeof value==='object'))throw new Error('Listing did not return a session array');
+  return result.filter(validExternal);
+}
+function base(path:string){return path.split(/[\\/]/).at(-1)??path;}
+async function safeList(ctx:AdapterContext,path:string,diagnostics:Diagnostic[]):Promise<FileInfo[]>{try{return await ctx.io.list(path);}catch{diagnostics.push(diag(ctx,'claude-source-unreadable','A Claude source directory is temporarily unavailable.','warning'));return[];}}
+
+/** Enumerate real project directory names, never reconstruct native project slugs. */
+export async function discoverClaudeTranscripts(ctx:AdapterContext,diagnostics:Diagnostic[]=[]):Promise<TranscriptFile[]> {
+  const files:TranscriptFile[]=[];
+  const projects=await safeList(ctx,ctx.io.join(ctx.root,'projects'),diagnostics);
+  for(const project of projects.filter(file=>file.isDirectory)) {
+    const entries=await safeList(ctx,project.path,diagnostics);
+    for(const entry of entries) {
+      const name=base(entry.path);
+      if(!entry.isDirectory && /^[0-9a-f-]{16,}\.jsonl$/i.test(name))files.push({info:entry,nativeId:name.slice(0,-6),parentNativeId:null});
+      if(entry.isDirectory && /^[0-9a-f-]{16,}$/i.test(name)) {
+        const children=await safeList(ctx,ctx.io.join(entry.path,'subagents'),diagnostics);
+        for(const child of children)if(!child.isDirectory && /^agent-[\w-]+\.jsonl$/i.test(base(child.path)))files.push({info:child,nativeId:`${name}/agent:${base(child.path).slice(6,-6)}`,parentNativeId:name});
+      }
+    }
+  }
+  return files;
+}
+
+/** Windows stores process birth identity as FILETIME; Linux registries may use start ticks. */
+export function registryProcessStart(record:any):string|null {
+  if(typeof record.procStart==='string' && /^\d{16,19}$/.test(record.procStart) && String(record.pidDomain??'').startsWith('win32:')) {
+    try{return new Date(Number((BigInt(record.procStart)-116444736000000000n)/10000n)).toISOString();}catch{return null;}
+  }
+  return iso(record.processStartedAt??record.processStartTime);
+}
+export async function registryIsLive(record:any,ctx:AdapterContext):Promise<boolean>{
+  if(!record||!Number.isInteger(record.pid)||typeof record.sessionId!=='string')return false;
+  const expected=registryProcessStart(record);if(!expected)return false;
+  const actual=await ctx.processIdentity(record.pid);if(!actual)return false;
+  return /(?:^|[\\/])claude(?:\.exe)?$/i.test(actual.executable) && Math.abs(Date.parse(actual.startedAt)-Date.parse(expected))<=2;
+}
+export function registryConversationMatches(record:any,session:Session,sessions:Session[]):boolean {
+  const processStart=registryProcessStart(record),activity=session.lastActivityAt;
+  if(!processStart || !activity || Date.parse(activity)<Date.parse(processStart)-2000)return false;
+  const cwd=(value:string|null|undefined)=>value?.replace(/\\/g,'/').replace(/\/$/,'').toLowerCase();
+  if(!record.cwd || !session.cwd || cwd(record.cwd)!==cwd(session.cwd))return false;
+  const registryAt=iso(record.updatedAt??record.statusUpdatedAt??record.startedAt);
+  if(!registryAt)return false;
+  const lastEvidence=Math.max(Date.parse(activity),Date.parse(registryAt));
+  // A newer conversation can contradict a registry left behind by /clear or /resume.
+  // With no supported listing, an ambiguous binding stays unknown instead of inventing liveness.
+  return !sessions.some(other=>other.id!==session.id&&!other.parentId&&cwd(other.cwd)===cwd(session.cwd)&&other.lastActivityAt!==null&&Date.parse(other.lastActivityAt)>lastEvidence);
+}
+
+export function applyClaudeRuntime(session:Session,external:ExternalSession,now:string,source='claude agents --json'):void {
+  if(typeof external.name==='string' && external.name.trim()){session.name=cleanText(external.name,4000)??session.name;session.nameSource='Native live name';}
+  if(typeof external.cwd==='string'){session.cwd=cleanText(external.cwd,2048);session.project=session.cwd?.split(/[\\/]/).filter(Boolean).at(-1)??null;}
+  const processAlive=typeof external.pid==='number' && typeof external.status==='string';
+  session.runtime={reachable:processAlive,loaded:processAlive,attachment:processAlive&&external.kind==='interactive'?'known':'unknown',pid:external.pid??null,processStartedAt:iso(external.startedAt),observedAt:now};
+  session.startedAt ||= iso(external.startedAt);
+  let state:NonNullable<Session['state']['value']>='unknown';
+  if(external.state==='done')state='complete';
+  else if(external.state==='failed'||external.state==='stopped')state='complete';
+  else if(external.status==='waiting')state=/permission|sandbox/i.test(external.waitingFor??'')?'approval':external.waitingFor==='input needed'?'input':'unknown';
+  else if(external.state==='blocked')state='input';
+  else if(external.status==='busy'||external.state==='working')state='running';
+  else if(external.status==='idle')state='idle';
+  session.state=metric(state,source,'task state; process liveness is separate','reported',external.waitingFor??(external.state?`Native task state: ${external.state}`:undefined),now);
+  if(external.waitingFor)session.latestActivity=cleanText(external.waitingFor)??session.latestActivity;
+  else if(external.state==='failed')session.latestActivity='Task ended with an error';
+  else if(external.state==='stopped')session.latestActivity='Task stopped';
+  if(session.startedAt && processAlive)session.timing.elapsedMs=metric(Math.max(0,Date.parse(now)-Date.parse(iso(external.startedAt)??session.startedAt)),source,'current process attachment elapsed','derived',undefined,now);
+}
+
+async function readTail(ctx:AdapterContext,file:TranscriptFile):Promise<ClaudeState>{
+  const state=initialClaudeState(file.nativeId,file.info.path,file.parentNativeId);
+  if(file.info.size<=1024*1024)return state;
+  const length=Math.min(768*1024,file.info.size),offset=file.info.size-length;
+  const buffer=await ctx.io.read(file.info.path,offset,length);
+  const after=await ctx.io.stat(file.info.path);
+  if(!after || after.identity!==file.info.identity || after.size<file.info.size || after.mtimeMs!==file.info.mtimeMs)throw new Error('Transcript changed during tail observation; retry');
+  const lines=buffer.toString('utf8').split('\n').slice(offset>0?1:0);
+  // The last fragment is incomplete unless a newline has been committed.
+  if(buffer.at(-1)!==10)lines.pop();
+  for(const line of lines){try{reduceClaudeRecord(state,JSON.parse(line.replace(/\r$/,'')));}catch{/* Partial initial tail fragments are expected. */}}
+  state.tailObservedAt=ctx.now;return state;
+}
+function mergeObservedTail(prefix:ClaudeState,tail:ClaudeState):ClaudeState {
+  const merged=structuredClone(prefix);
+  for(const field of ['cwd','branch','lastActivityAt','model','effort','explicitTitle','generatedTitle','summary','currentTurn','checklist','nativeCost','tailObservedAt'] as const)if(tail[field]!==null)(merged as any)[field]=tail[field];
+  // There may be an unread gap between prefix and tail. Never assign tail responses to an older prefix turn.
+  if(tail.tailObservedAt && tail.currentTurn===null)merged.currentTurn=null;
+  merged.startedAt=prefix.startedAt&&tail.startedAt?(prefix.startedAt<tail.startedAt?prefix.startedAt:tail.startedAt):prefix.startedAt??tail.startedAt;
+  merged.firstPrompt??=tail.firstPrompt;merged.forkedFrom??=tail.forkedFrom;
+  for(const [id,response]of Object.entries(tail.responses))if(!merged.responses[id]||response.final||!merged.responses[id].final)merged.responses[id]=response;
+  for(const[id,tool]of Object.entries(tail.tools)){const previous=merged.tools[id];merged.tools[id]=previous?.resultAt && (!tool.resultAt||previous.resultAt>=tool.resultAt)?previous:tool;}
+  for(const[id,turn]of Object.entries(tail.turns))merged.turns[id]=merged.turns[id]?.durationMs!==null&&merged.turns[id]?.durationMs!==undefined?merged.turns[id]:turn;
+  const activities=new Map(prefix.activities.map(activity=>[activity.id,activity]));for(const activity of tail.activities)activities.set(activity.id,activity);merged.activities=[...activities.values()].sort((a,b)=>a.at.localeCompare(b.at)).slice(-80);
+  for(const[kind,count]of Object.entries(tail.unknown))merged.unknown[kind]=Math.max(merged.unknown[kind]??0,count);
+  if(tail.checklist && tail.checklistTiming){merged.checklistTiming=tail.checklistTiming;}
+  return merged;
+}
+
+export function createClaudeAdapter():ProviderAdapter {
+  let helpChecked=false,supported=false,allSupported=false,lastListingAt=0,cachedListing:ExternalSession[]=[],listingHealthy=false;
+  let lastFilesAt=0,cachedFiles:TranscriptFile[]=[];
+  const transcriptCache=new Map<string,{session:Session;complete:boolean;size:number;mtimeMs:number;identity:string;processedAt:number}>();
+  const tailCache=new Map<string,{size:number;mtimeMs:number;identity:string;generation:number;state:ClaudeState}>();
+  return {provider:'claude',async poll(ctx):Promise<AdapterResult>{
+    const diagnostics:Diagnostic[]=[];
+    if(!helpChecked){
+      const help=await ctx.command('claude',['agents','--help'],6000);supported=help.code===0 && /--json\b/.test(help.stdout);allSupported=/--all\b/.test(help.stdout);helpChecked=true;
+      if(!supported)diagnostics.push(diag(ctx,'claude-external-list-unavailable','Installed Claude does not expose a verified noninteractive session listing. Using passive transcripts and validated registry hints.','warning'));
+    }
+    if(supported && Date.parse(ctx.now)-lastListingAt>=3000){
+      lastListingAt=Date.parse(ctx.now);
+      const result=await ctx.command('claude',['agents','--json',...(allSupported?['--all']:[])],7000);
+      try{if(result.code!==0)throw new Error();cachedListing=parseClaudeListing(result.stdout);listingHealthy=true;}
+      catch{listingHealthy=false;cachedListing=[];diagnostics.push(diag(ctx,'claude-list-failed','Claude session listing is temporarily unavailable; runtime state is unconfirmed.','warning'));}
+    }
+    if(!supported)diagnostics.push(diag(ctx,'claude-transcript-only','Claude is observed from transcripts. Recent file activity does not establish a live process.'));
+    if(!cachedFiles.length || Date.parse(ctx.now)-lastFilesAt>=5000){cachedFiles=await discoverClaudeTranscripts(ctx,diagnostics);lastFilesAt=Date.parse(ctx.now);}
+    const liveIds=new Set(cachedListing.map(row=>row.sessionId).filter(Boolean));
+    const files=cachedFiles.slice().sort((a,b)=>Number(liveIds.has(b.nativeId))-Number(liveIds.has(a.nativeId))||b.info.mtimeMs-a.info.mtimeMs);
+    const sessions=new Map<string,Session>();let processed=0;
+    const candidates=files.filter(file=>{const cached=transcriptCache.get(file.info.path);return !cached||!cached.complete||cached.size!==file.info.size||cached.mtimeMs!==file.info.mtimeMs||cached.identity!==file.info.identity;});
+    const order=(a:TranscriptFile,b:TranscriptFile)=>(transcriptCache.get(a.info.path)?.processedAt??0)-(transcriptCache.get(b.info.path)?.processedAt??0)||b.info.mtimeMs-a.info.mtimeMs;
+    const active=candidates.filter(file=>liveIds.has(file.nativeId)).sort(order).slice(0,4);
+    const rest=candidates.filter(file=>!active.includes(file)).sort(order).slice(0,8-active.length);
+    for(const file of [...active,...rest]){
+      try{
+        const currentInfo=await ctx.io.stat(file.info.path);if(!currentInfo)throw new Error('Transcript disappeared before read');
+        const observedFile={...file,info:currentInfo};
+        const result=await ctx.ingest(file.info.path,()=>initialClaudeState(file.nativeId,file.info.path,file.parentNativeId),(state,record)=>reduceClaudeRecord(state,record));
+        // Bounded tail observation keeps metadata and recent finalized records current during historical backfill.
+        let state=result.state;
+        if(!result.complete){
+          const tail=tailCache.get(file.info.path);
+          if(tail && tail.size===currentInfo.size && tail.mtimeMs===currentInfo.mtimeMs && tail.identity===currentInfo.identity && tail.generation===result.generation)state=mergeObservedTail(result.state,tail.state);
+          else {const recent=await readTail(ctx,observedFile);tailCache.set(file.info.path,{size:currentInfo.size,mtimeMs:currentInfo.mtimeMs,identity:currentInfo.identity,generation:result.generation,state:recent});state=mergeObservedTail(result.state,recent);}
+        }else tailCache.delete(file.info.path);
+        const session=claudeSession(state,ctx.namespace,ctx.now,result.complete);
+        if(result.errors)session.diagnostics.push(diag(ctx,'claude-json-errors',`${result.errors} malformed complete transcript records were skipped.`, 'warning'));
+        transcriptCache.set(file.info.path,{session,complete:result.complete,size:currentInfo.size,mtimeMs:currentInfo.mtimeMs,identity:currentInfo.identity,processedAt:Date.parse(ctx.now)});
+        processed++;
+      }catch{diagnostics.push(diag(ctx,'claude-transcript-read-failed','A transcript is locked, removed, or temporarily unreadable. It will be reconciled again.','warning'));}
+    }
+    const present=new Set(files.map(file=>file.info.path));for(const path of transcriptCache.keys())if(!present.has(path)){transcriptCache.delete(path);tailCache.delete(path);}
+    for(const file of files){
+      const cached=transcriptCache.get(file.info.path);
+      const session=cached?structuredClone(cached.session):emptySession('claude',ctx.namespace,file.nativeId,file.info.path,ctx.now);
+      if(!cached){session.parentId=file.parentNativeId?sessionKey('claude',ctx.namespace,file.parentNativeId):null;session.latestActivity='Waiting for historical backfill';session.diagnostics.push(diag(ctx,'claude-backfill-pending','Transcript discovered; historical metrics will be backfilled in a bounded batch.'));}
+      const previous=sessions.get(session.id);if(!previous||(session.lastActivityAt??'')>(previous.lastActivityAt??''))sessions.set(session.id,session);
+    }
+    if(listingHealthy)for(const external of cachedListing){
+      const nativeId=external.sessionId;if(!nativeId)continue;
+      const id=sessionKey('claude',ctx.namespace,nativeId),session=sessions.get(id)??emptySession('claude',ctx.namespace,nativeId,'claude agents --json',ctx.now);
+      applyClaudeRuntime(session,external,ctx.now);
+      sessions.set(id,session);
+    }
+    const pendingBackground=cachedListing.filter(external=>!external.sessionId&&external.id).length;
+    if(pendingBackground)diagnostics.push(diag(ctx,'claude-background-conversation-pending',`${pendingBackground} background job${pendingBackground===1?' has':'s have'} not reported a native conversation ID yet. Conversations appear automatically when their identities are available.`));
+    if(!supported || !listingHealthy){
+      const registries=await safeList(ctx,ctx.io.join(ctx.root,'sessions'),diagnostics);
+      for(const registry of registries.filter(file=>!file.isDirectory && /^\d+\.json$/.test(base(file.path)))){
+        try{
+          const text=await ctx.io.text(registry.path,32*1024);if(!text)continue;const record=JSON.parse(text);
+          if(!await registryIsLive(record,ctx))continue;
+          const session=sessions.get(sessionKey('claude',ctx.namespace,record.sessionId));
+          // A registry left behind after /clear must not create a new conversation without transcript evidence.
+          if(!session)continue;
+          if(!registryConversationMatches(record,session,[...sessions.values()])){session.state=metric('unknown','native session registry','runtime','unavailable','The process exists, but its current conversation binding could not be confirmed',ctx.now);diagnostics.push(diag(ctx,'claude-registry-binding-uncertain','A registry process is alive, but transcript evidence cannot confirm its current conversation. Runtime state remains unknown.'));continue;}
+          applyClaudeRuntime(session,record,ctx.now,'validated native session registry');
+          session.runtime.processStartedAt=registryProcessStart(record);
+          session.state.provenance.quality='derived';session.state.provenance.reason='Registry PID and process creation identity match; transcript identity confirmed';
+        }catch{diagnostics.push(diag(ctx,'claude-registry-unreadable','A native session registry entry could not be validated.','info'));}
+      }
+    }
+    diagnostics.push(diag(ctx,'claude-capabilities',`${files.length} transcripts discovered; ${processed} incrementally refreshed this cycle. ${supported?'Supported JSON discovery enabled.':'Transcript discovery enabled.'} Subscription allowance is unavailable: ordinary session sources do not expose it.`));
+    return{sessions:[...sessions.values()],allowances:[],diagnostics};
+  }};
+}
