@@ -15,13 +15,16 @@ export function createObserverProcessRunner(): ObserverProcessRunner {
   const children = new Set<ChildProcess>(); let closed = false;
   async function stop(child: ChildProcess): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null || !children.has(child)) return;
+    const exited = new Promise<void>(resolve => { const timer=setTimeout(resolve,2000); child.once('close',()=>{clearTimeout(timer);resolve();}); });
     // The PID comes only from a child created and still tracked by this runner, never source metadata.
     if (process.platform === 'win32' && child.pid) {
       await new Promise<void>(resolve => {
         const killer = spawn(path.join(process.env.SystemRoot || 'C:\\Windows','System32','taskkill.exe'),['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});
-        killer.once('error',() => { child.kill(); resolve(); }); killer.once('exit',() => resolve());
+        const timer=setTimeout(()=>{killer.kill();child.kill('SIGKILL');resolve();},750);
+        killer.once('error',() => { clearTimeout(timer);child.kill('SIGKILL');resolve(); }); killer.once('exit',code => { clearTimeout(timer);if(code!==0)child.kill('SIGKILL');resolve(); });
       });
     } else if (child.pid) { try { process.kill(-child.pid,'SIGKILL'); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') child.kill('SIGKILL'); } }
+    await exited;
   }
   async function execute(command: ObserverCommand, files: boolean): Promise<ObserverProcessResult> {
     if (closed) throw new ObserverWorkerError('unavailable','Observer worker is closed.');
@@ -44,6 +47,7 @@ export function createObserverProcessRunner(): ObserverProcessRunner {
         const timeout = setTimeout(() => fail(new ObserverWorkerError('timeout',`Observer assessment exceeded ${Math.round(command.timeoutMs/1000)} seconds.`)),command.timeoutMs);
         const abort = () => fail(new ObserverWorkerError('superseded','Observer assessment was superseded.'));
         command.signal?.addEventListener('abort',abort,{once:true});
+        if(command.signal?.aborted)abort();
         const fileLimit = files ? setInterval(() => { if (!directory || done) return; void Promise.all([fs.stat(path.join(directory,'stdout')),fs.stat(path.join(directory,'stderr'))]).then(([o,e]) => { if (o.size > max || e.size > errMax) fail(new ObserverWorkerError('invalid-output','Observer CLI output exceeded the bounded response limit.')); }).catch(() => { if (!done) fail(new ObserverWorkerError('provider-error','Observer output capture became unavailable.')); }); },100) : null;
         const cleanup = () => { done = true; clearTimeout(timeout); if (fileLimit) clearInterval(fileLimit); command.signal?.removeEventListener('abort',abort); children.delete(child); };
         child.stdout?.on('data',(chunk: Buffer) => { outBytes += chunk.length; if (outBytes > max) fail(new ObserverWorkerError('invalid-output','Observer CLI output exceeded the bounded response limit.')); else out.push(chunk); });

@@ -7,7 +7,7 @@ export interface Usage {
   cacheCreation: number | null; reasoning: number | null; total: number | null;
 }
 export interface UsageSlice { model: string | null; usage: Usage; serviceTier: string | null; cacheCreation5m?: number | null; cacheCreation1h?: number | null }
-export interface ToolSummary { name: string; category: string; calls: number; succeeded: number; failed: number; unknown: number; durationMs: number | null; retries: number | null }
+export interface ToolSummary { name: string; category: string; calls: number; succeeded: number; failed: number; unknown: number; durationMs: number | null; retries: number | null; inFlight?: number; interrupted?: number }
 export interface Activity { id: string; at: string; occurredAt?: string; ingestedAt?: string; originalTimestamp?: string | number; kind: 'turn' | 'tool' | 'edit' | 'status' | 'compaction' | 'usage'; label: string; detail?: string; outcome?: 'success' | 'failure' | 'unknown' }
 export interface TrendPoint { at: string; input: number; output: number; tools: number }
 export interface Allowance { id: string; label: string; accountKey: string; usedPercent: Metric<number>; windowMinutes: number | null; resetsAt: string | null }
@@ -31,11 +31,11 @@ export interface Session {
   task?: TaskEvidence;
   collection?: { lastCheckedAt: string; ingestedAt: string | null; evidenceAt: string | null; condition: 'current' | 'stale' | 'backfilling' | 'unavailable'; reason: string };
   workspaceBranch?: Metric<string>;
-  aggregates?: { main: Usage | null; children: Usage | null; inclusive: Usage | null; childCount: number; partial: boolean };
+  aggregates?: { main: Usage | null; children: Usage | null; inclusive: Usage | null; childCount: number; partial: boolean; observedChildren?: Usage | null; observedInclusive?: Usage | null; knownChildren?: number };
   agentRole?: 'implementation' | 'approval-reviewer' | 'unknown';
   diagnostics: Diagnostic[];
 }
-export interface Snapshot { revision: number; observedAt: string; sessions: Session[]; allowances: Allowance[]; diagnostics: Diagnostic[]; collecting: boolean; observer?: ObserverSnapshot }
+export interface Snapshot { revision: number; observedAt: string; sessions: Session[]; allowances: Allowance[]; diagnostics: Diagnostic[]; collecting: boolean; observer?: ObserverSnapshot; build?: { id: string; builtAt: string } }
 export function metric<T>(value: T | null, source: string, scope: string, quality: Quality = value === null ? 'unavailable' : 'reported', reason?: string, observedAt = new Date().toISOString()): Metric<T> {
   return { value, provenance: { source, scope, quality, reason, observedAt } };
 }

@@ -33,6 +33,10 @@ export function compareTimestamps(a: unknown, b: unknown): number {
   const left = epochMilliseconds(a), right = epochMilliseconds(b);
   return left === null ? (right === null ? 0 : 1) : right === null ? -1 : left - right;
 }
+export function compareTimestampsNewestFirst(a: unknown, b: unknown): number {
+  const left = epochMilliseconds(a), right = epochMilliseconds(b);
+  return left === null ? (right === null ? 0 : 1) : right === null ? -1 : right - left;
+}
 
 export function detectedTimeZone(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
@@ -46,9 +50,9 @@ export function resolveTimeZone(zone?: string | null): string { return validTime
 export function formatTimestamp(value: unknown, zone?: string | null, options?: Intl.DateTimeFormatOptions): string {
   const milliseconds = epochMilliseconds(value);
   if (milliseconds === null) return 'Not reported';
-  const defaults: Intl.DateTimeFormatOptions = options ?? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' };
+  const defaults: Intl.DateTimeFormatOptions = options ?? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' };
   const hasClock = Boolean(defaults.hour || defaults.minute || defaults.second);
-  return new Intl.DateTimeFormat('en-US', { hourCycle: 'h23', ...(hasClock ? { timeZoneName: 'short' } : {}), ...defaults, timeZone: resolveTimeZone(zone) }).format(milliseconds);
+  return new Intl.DateTimeFormat('en-US', { hourCycle: 'h12', ...(hasClock ? { timeZoneName: 'short' } : {}), ...defaults, timeZone: resolveTimeZone(zone) }).format(milliseconds);
 }
 
 export function relativeAge(value: unknown, now: unknown = Date.now()): string {

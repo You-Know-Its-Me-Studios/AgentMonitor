@@ -82,4 +82,8 @@ describe('Codex passive discovery',()=>{
     files.set('/codex/session_index.jsonl',files.get('/codex/session_index.jsonl')+JSON.stringify({id,thread_name:'Renamed native title',updated_at:'2026-11-03T12:00:20Z'})+'\n');files.set(`/codex/sessions/rollout-${other}.jsonl`,JSON.stringify(record('session_meta',{id:other,timestamp:at,cwd:'/same'}))+'\n');context.now='2026-11-03T12:00:20Z';
     const second=await adapter.poll(context);expect(second.sessions).toHaveLength(2);expect(second.sessions.find(x=>x.id===stable)?.name).toBe('Renamed native title');expect(second.sessions.every(x=>!x.runtime.loaded)).toBe(true);await adapter.close?.();
   });
+  it('excludes canonical observer run workspaces without treating their work as a monitored conversation',async()=>{
+    const{context,files}=fakeContext(),adapter=createCodexAdapter();files.set(`/codex/sessions/rollout-${id}.jsonl`,JSON.stringify(record('session_meta',{id,timestamp:at,cwd:'/work/.agent-monitor/observer/run-test'}))+'\n'+JSON.stringify(record('response_item',{type:'message',role:'user',content:[{type:'input_text',text:'Internal observer instructions'}]}))+'\n');
+    const result=await adapter.poll(context);expect(result.sessions).toEqual([]);await adapter.close?.();
+  });
 });

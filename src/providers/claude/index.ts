@@ -1,6 +1,7 @@
 import type { AdapterContext, AdapterResult, FileInfo, ProviderAdapter } from '../../shared/adapter.js';
 import { emptySession, metric, sessionKey, type Diagnostic, type Session } from '../../shared/types.js';
 import { claudeSession, cleanText, initialClaudeState, iso, reduceClaudeRecord, type ClaudeState } from './parser.js';
+import { isObserverWorkspace, mergeTaskEvidence } from '../../server/task-evidence.js';
 
 interface ExternalSession { sessionId?: string; id?: string; cwd?: string; kind?: string; startedAt?: number; pid?: number; status?: string; waitingFor?: string; state?: string; name?: string }
 interface TranscriptFile { info: FileInfo; nativeId: string; parentNativeId: string | null }
@@ -74,7 +75,8 @@ export function applyClaudeRuntime(session:Session,external:ExternalSession,now:
   else if(external.state==='blocked')state='input';
   else if(external.status==='busy'||external.state==='working')state='running';
   else if(external.status==='idle')state='idle';
-  session.state=metric(state,source,'task state; process liveness is separate','reported',external.waitingFor??(external.state?`Native task state: ${external.state}`:undefined),now);
+  const reason=external.waitingFor?`Native process is waiting for ${cleanText(external.waitingFor,200)}; ${state==='unknown'?'the exact task state is unavailable':'this waiting condition is explicitly reported'}.`:external.state?`Native task state is ${external.state}; ${processAlive?'its process remains live':'no live process was reported'}.`:external.status==='idle'?'Native listing reports an idle live process; idle does not mean the conversation or process exited.':external.status==='busy'?'Native listing reports a busy live process.':'Native listing did not report a recognized process or task state.';
+  session.state=metric(state,source,'task state; process liveness is separate','reported',reason,now);
   if(external.waitingFor)session.latestActivity=cleanText(external.waitingFor)??session.latestActivity;
   else if(external.state==='failed')session.latestActivity='Task ended with an error';
   else if(external.state==='stopped')session.latestActivity='Task stopped';
@@ -84,14 +86,14 @@ export function applyClaudeRuntime(session:Session,external:ExternalSession,now:
 async function readTail(ctx:AdapterContext,file:TranscriptFile):Promise<ClaudeState>{
   const state=initialClaudeState(file.nativeId,file.info.path,file.parentNativeId);
   if(file.info.size<=1024*1024)return state;
-  const length=Math.min(768*1024,file.info.size),offset=file.info.size-length;
+  const length=Math.min(4*1024*1024,file.info.size),offset=file.info.size-length;
   const buffer=await ctx.io.read(file.info.path,offset,length);
   const after=await ctx.io.stat(file.info.path);
   if(!after || after.identity!==file.info.identity || after.size<file.info.size || after.mtimeMs!==file.info.mtimeMs)throw new Error('Transcript changed during tail observation; retry');
   const lines=buffer.toString('utf8').split('\n').slice(offset>0?1:0);
   // The last fragment is incomplete unless a newline has been committed.
   if(buffer.at(-1)!==10)lines.pop();
-  for(const line of lines){try{reduceClaudeRecord(state,JSON.parse(line.replace(/\r$/,'')));}catch{/* Partial initial tail fragments are expected. */}}
+  for(const line of lines){try{reduceClaudeRecord(state,JSON.parse(line.replace(/\r$/,'')),{source:file.info.path,offset,generation:0,ingestedAt:ctx.now});}catch{/* Partial initial tail fragments are expected. */}}
   state.tailObservedAt=ctx.now;return state;
 }
 function mergeObservedTail(prefix:ClaudeState,tail:ClaudeState):ClaudeState {
@@ -107,6 +109,7 @@ function mergeObservedTail(prefix:ClaudeState,tail:ClaudeState):ClaudeState {
   const activities=new Map(prefix.activities.map(activity=>[activity.id,activity]));for(const activity of tail.activities)activities.set(activity.id,activity);merged.activities=[...activities.values()].sort((a,b)=>a.at.localeCompare(b.at)).slice(-80);
   for(const[kind,count]of Object.entries(tail.unknown))merged.unknown[kind]=Math.max(merged.unknown[kind]??0,count);
   if(tail.checklist && tail.checklistTiming){merged.checklistTiming=tail.checklistTiming;}
+  merged.taskEvidence=mergeTaskEvidence(prefix.taskEvidence,tail.taskEvidence,merged.nativeId);
   return merged;
 }
 
@@ -115,6 +118,7 @@ export function createClaudeAdapter():ProviderAdapter {
   let lastFilesAt=0,cachedFiles:TranscriptFile[]=[];
   const transcriptCache=new Map<string,{session:Session;complete:boolean;size:number;mtimeMs:number;identity:string;processedAt:number}>();
   const tailCache=new Map<string,{size:number;mtimeMs:number;identity:string;generation:number;state:ClaudeState}>();
+  const excludedFiles=new Set<string>();
   return {provider:'claude',async poll(ctx):Promise<AdapterResult>{
     const diagnostics:Diagnostic[]=[];
     if(!helpChecked){
@@ -130,7 +134,8 @@ export function createClaudeAdapter():ProviderAdapter {
     if(!supported)diagnostics.push(diag(ctx,'claude-transcript-only','Claude is observed from transcripts. Recent file activity does not establish a live process.'));
     if(!cachedFiles.length || Date.parse(ctx.now)-lastFilesAt>=5000){cachedFiles=await discoverClaudeTranscripts(ctx,diagnostics);lastFilesAt=Date.parse(ctx.now);}
     const liveIds=new Set(cachedListing.map(row=>row.sessionId).filter(Boolean));
-    const files=cachedFiles.slice().sort((a,b)=>Number(liveIds.has(b.nativeId))-Number(liveIds.has(a.nativeId))||b.info.mtimeMs-a.info.mtimeMs);
+    const observerIds=new Set(cachedListing.filter(row=>isObserverWorkspace(row.cwd)).map(row=>row.sessionId));
+    const files=cachedFiles.filter(file=>!observerIds.has(file.nativeId)&&!observerIds.has(file.parentNativeId??'')).sort((a,b)=>Number(liveIds.has(b.nativeId))-Number(liveIds.has(a.nativeId))||b.info.mtimeMs-a.info.mtimeMs);
     const sessions=new Map<string,Session>();let processed=0;
     const candidates=files.filter(file=>{const cached=transcriptCache.get(file.info.path);return !cached||!cached.complete||cached.size!==file.info.size||cached.mtimeMs!==file.info.mtimeMs||cached.identity!==file.info.identity;});
     const order=(a:TranscriptFile,b:TranscriptFile)=>(transcriptCache.get(a.info.path)?.processedAt??0)-(transcriptCache.get(b.info.path)?.processedAt??0)||b.info.mtimeMs-a.info.mtimeMs;
@@ -140,7 +145,7 @@ export function createClaudeAdapter():ProviderAdapter {
       try{
         const currentInfo=await ctx.io.stat(file.info.path);if(!currentInfo)throw new Error('Transcript disappeared before read');
         const observedFile={...file,info:currentInfo};
-        const result=await ctx.ingest(file.info.path,()=>initialClaudeState(file.nativeId,file.info.path,file.parentNativeId),(state,record)=>reduceClaudeRecord(state,record));
+        const result=await ctx.ingest(file.info.path,()=>initialClaudeState(file.nativeId,file.info.path,file.parentNativeId),(state,record,meta)=>reduceClaudeRecord(state,record,{...meta,ingestedAt:ctx.now}));
         // Bounded tail observation keeps metadata and recent finalized records current during historical backfill.
         let state=result.state;
         if(!result.complete){
@@ -149,6 +154,8 @@ export function createClaudeAdapter():ProviderAdapter {
           else {const recent=await readTail(ctx,observedFile);tailCache.set(file.info.path,{size:currentInfo.size,mtimeMs:currentInfo.mtimeMs,identity:currentInfo.identity,generation:result.generation,state:recent});state=mergeObservedTail(result.state,recent);}
         }else tailCache.delete(file.info.path);
         const session=claudeSession(state,ctx.namespace,ctx.now,result.complete);
+        if(isObserverWorkspace(session.cwd)){excludedFiles.add(file.info.path);transcriptCache.delete(file.info.path);tailCache.delete(file.info.path);continue;}excludedFiles.delete(file.info.path);
+        session.collection={lastCheckedAt:ctx.now,ingestedAt:result.bytesRead>0?ctx.now:transcriptCache.get(file.info.path)?.session.collection?.ingestedAt??null,evidenceAt:state.lastActivityAt,condition:result.complete?'current':'backfilling',reason:result.complete?'Native transcript reconciled':'Recent task evidence is observed while older history is backfilled'};
         if(result.errors)session.diagnostics.push(diag(ctx,'claude-json-errors',`${result.errors} malformed complete transcript records were skipped.`, 'warning'));
         transcriptCache.set(file.info.path,{session,complete:result.complete,size:currentInfo.size,mtimeMs:currentInfo.mtimeMs,identity:currentInfo.identity,processedAt:Date.parse(ctx.now)});
         processed++;
@@ -156,13 +163,14 @@ export function createClaudeAdapter():ProviderAdapter {
     }
     const present=new Set(files.map(file=>file.info.path));for(const path of transcriptCache.keys())if(!present.has(path)){transcriptCache.delete(path);tailCache.delete(path);}
     for(const file of files){
+      if(excludedFiles.has(file.info.path))continue;
       const cached=transcriptCache.get(file.info.path);
       const session=cached?structuredClone(cached.session):emptySession('claude',ctx.namespace,file.nativeId,file.info.path,ctx.now);
       if(!cached){session.parentId=file.parentNativeId?sessionKey('claude',ctx.namespace,file.parentNativeId):null;session.latestActivity='Waiting for historical backfill';session.diagnostics.push(diag(ctx,'claude-backfill-pending','Transcript discovered; historical metrics will be backfilled in a bounded batch.'));}
       const previous=sessions.get(session.id);if(!previous||(session.lastActivityAt??'')>(previous.lastActivityAt??''))sessions.set(session.id,session);
     }
     if(listingHealthy)for(const external of cachedListing){
-      const nativeId=external.sessionId;if(!nativeId)continue;
+      const nativeId=external.sessionId;if(!nativeId||isObserverWorkspace(external.cwd))continue;
       const id=sessionKey('claude',ctx.namespace,nativeId),session=sessions.get(id)??emptySession('claude',ctx.namespace,nativeId,'claude agents --json',ctx.now);
       applyClaudeRuntime(session,external,ctx.now);
       sessions.set(id,session);
@@ -185,6 +193,7 @@ export function createClaudeAdapter():ProviderAdapter {
         }catch{diagnostics.push(diag(ctx,'claude-registry-unreadable','A native session registry entry could not be validated.','info'));}
       }
     }
+    for(const session of sessions.values())if(!session.runtime.reachable){const reason=supported&&!listingHealthy?'Supported Claude JSON listing is temporarily unavailable; live session state cannot be verified.':!supported?'This installed Claude CLI does not expose verified JSON session listing; only transcript or validated registry evidence is available.':'Native listing did not report a live process for this conversation.';session.state.provenance.reason=`${session.state.provenance.reason??'Transcript evidence does not establish liveness.'} ${reason}`;if(session.collection)session.collection.reason=`${session.collection.reason}. ${reason}`;}
     diagnostics.push(diag(ctx,'claude-capabilities',`${files.length} transcripts discovered; ${processed} incrementally refreshed this cycle. ${supported?'Supported JSON discovery enabled.':'Transcript discovery enabled.'} Subscription allowance is unavailable: ordinary session sources do not expose it.`));
     return{sessions:[...sessions.values()],allowances:[],diagnostics};
   }};

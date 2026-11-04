@@ -10,8 +10,10 @@ export class ObserverProxy {
   private sequence = 0;
   private buffer = '';
   private initialized = false;
+  private receivedSequence = 0;
   notifications = new Map<string, any>();
   error: string | null = null;
+  get connected():boolean{return this.initialized&&!!this.child&&!this.child.killed&&this.child.exitCode===null&&this.child.signalCode===null;}
   async connect(context: AdapterContext, socket?: string): Promise<void> {
     if (this.initialized && this.child && !this.child.killed) return;
     let executable = 'codex', args = ['app-server','proxy'];
@@ -35,11 +37,12 @@ export class ObserverProxy {
     child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`); this.initialized = true;
   }
   private receive(message: any): void {
+    const order=++this.receivedSequence;
     // Refuse every incoming request. An observer never services approvals or elicitation.
     if (message.id !== undefined && message.method) { this.child?.stdin.write(`${JSON.stringify({ id: message.id, error: { code: -32601, message: 'Read-only observer' } })}\n`); return; }
-    if (typeof message.id === 'number') { const p = this.pending.get(message.id); if (p) { clearTimeout(p.timer); this.pending.delete(message.id); if (message.error) p.reject(new Error(`Codex read request rejected (${message.error.code ?? 'unsupported'})`)); else p.resolve(message.result); } return; }
+    if (typeof message.id === 'number') { const p = this.pending.get(message.id); if (p) { clearTimeout(p.timer); this.pending.delete(message.id); if (message.error) p.reject(new Error(`Codex read request rejected (${message.error.code ?? 'unsupported'})`)); else p.resolve(message.result&&typeof message.result==='object'?{...message.result,__observerSequence:order}:message.result); } return; }
     // Only retain passive lifecycle/name/usage notifications. No prose or server requests.
-    if (['thread/status/changed','thread/name/updated','thread/tokenUsage/updated'].includes(message.method) && typeof message.params?.threadId === 'string') this.notifications.set(`${message.method}:${message.params.threadId}`,message.params);
+    if (['thread/status/changed','thread/name/updated','thread/tokenUsage/updated'].includes(message.method) && typeof message.params?.threadId === 'string') this.notifications.set(`${message.method}:${message.params.threadId}`,{...message.params,__observerSequence:order});
   }
   request(method: string, params?: any): Promise<any> {
     if (!READ_METHODS.has(method)) return Promise.reject(new Error('Observer method is not allowed'));

@@ -10,7 +10,7 @@
     "dev": "npm run build && node --watch dist/server/main.js",
     "dev:ui": "vite build --watch --configLoader native",
     "start": "node dist/server/main.js",
-    "build": "vite build --configLoader native && tsc -p tsconfig.server.json",
+    "build": "vite build --configLoader native && tsc -p tsconfig.server.json && node scripts/write-build.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --configLoader native",
     "test:browser": "playwright test"

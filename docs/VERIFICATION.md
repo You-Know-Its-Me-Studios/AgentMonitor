@@ -1,5 +1,49 @@
 # Verification record
 
+## Latest launcher and screenshot corrections
+
+**187 tests in 22 files passed**, including the opt-in passive real Codex source check. TypeScript checking and the complete production build passed. The build writes `dist/build.json` and includes both the compiled backend and bundled frontend. No dashboard, browser, shortcut or real observer was launched during these corrections.
+
+Nine isolated launcher tests cover matching-build reuse, simultaneous launches, safe stale-build replacement, paths with spaces, another workspace's port, wrong process command, reused PID and denied identity checks. Five lifecycle tests cover private restart authorization, instance binding, cross-origin rejection and build identity. The running production dashboard itself was left untouched; the next normal shortcut launch performs replacement if its old instance can be verified.
+
+Screenshot regressions cover one newest-first activity timeline, source-aware runtime states, visible subagent timestamps, wrapping tabs, overflow access and keyboard navigation. Exact New York date/time regressions now check November 3, 2026 at **8:02 PM EST**, an event at **8:01:50 PM** with a ten-second age, summer EDT and the repeated fall hour.
+
+The final real-source check exposed another source-selection gap: the task brief had fallen outside the newest 4 MiB of rollout while progressive backfill was still before it. A bounded read-only query of recognized native `thread_items` user-message rows now recovers the current request without scanning intervening tool output or replaying usage. The 14,841,953-byte real source recovered the original Update task at `2026-11-04T01:08:49.037Z` and current evidence through `02:15:26Z`. Synthetic tests verify thread isolation, canonical task identity and replay across a 5 MiB output gap.
+
+The local `git add .` command was attempted and denied when creating `.git/index.lock` because repository metadata is read-only in this session. The connected GitHub API is used for the authorized source commit to `main`; local Git metadata is not changed by that route. Private caches, logs, generated build output and provider history are excluded.
+
+The observer/runtime live-source limitations below still apply. A passing fixture worker response is not a successful authenticated model assessment.
+
+## Current observer update
+
+The latest implementation request explicitly authorized observer model calls, focused automated checks, type checking, the production build, and one bounded live assessment. It supersedes the prior no-model rule for assessment only. No browsers, screenshot reviews, dashboard launches, shortcut launches, provider configuration changes, or working-session control actions were performed for this update.
+
+Implemented paths include task evidence recovery, both isolated CLI workers, structured response validation, persisted backend scheduling/settings/results/calibration, authenticated observer APIs, SSE delivery, Timing & Progress controls, per-model effort validation, response-scoped pricing, native/current branch separation, subagent aggregation, current-tail ingestion and shared timezone utilities.
+
+Final checks passed: **161 tests in 19 files**, with the opt-in real native source test enabled; **TypeScript checking passed**; **the production build passed**. The real source check recovered the same current Update task after the latest correction (scope revision 2), with source events through `2026-11-04T01:49:36.676Z` while the first 4 MiB still ended at `00:27:40.686Z`. The selected session remained distinct from its subagents and observer runs. Test commands were `npm test` with `AGENT_MONITOR_LIVE_ROOT`, `AGENT_MONITOR_LIVE_THREAD` and `AGENT_MONITOR_EXPECT_TASK_PREFIX=Update`, `npm run typecheck`, and `npm run build`.
+
+### Actual timestamp cause
+
+This was a source-selection/backfill problem, not evidence of a fixed three-hour timezone error. The old normalized activity list lagged behind the growing rollout. Native SQLite update metadata could make Last Activity look newer than the activity events actually ingested. The rollout's modification time also stayed unchanged while its byte size and records advanced. Current-tail reconciliation now merges by native identity; database recency is not substituted for an event occurrence. Cache reducer version `task-evidence-v2` rebuilds dashboard-owned checkpoints only.
+
+The passive real-source regression recovered this actual session's latest **Update** task, start `2026-11-04T01:08:49.029Z`, separate from conversation age; it recovered public instructions, recent tool/results/subagent evidence, model and effort. Original timestamp, UTC occurrence, ingestion and poll instants remain separate. Exact Eastern and summer/DST regressions are in `tests/time.test.ts` and [timestamp policy](TIMESTAMPS.md).
+
+### Real observer attempts: not a success claim
+
+The actual installed capabilities were verified: Codex 0.166.0 and Claude Code 2.1.318 support the required noninteractive isolation/output flags. Codex isolation also performs a source-verified **empty-stdin configuration preflight**, which exits before creating any turn or model request. This found and fixed a real bug where ignored user MCP definitions were recreated as incomplete overrides. Ordinary user MCP entries are excluded; full definitions present in the isolated execution view are disabled and revalidated without copying transports or credentials.
+
+Bounded assessment attempts used the recovered current Codex task through the actual worker/service path. **No successful real-provider assessment was obtained in this restricted session.** Codex failed to initialize its in-process client with `Access is denied (os error 5)` after configuration validation. Claude was attempted as the alternate observer and reached the enforced **60-second timeout** without a structured result. Only application-created observer children were targeted for termination. No ETA or usage was fabricated, and the specific failures were persisted. The full success path is verified with isolated structured-response, process, HTTP, SQLite and SSE tests; that is not described as live provider success.
+
+The existing Codex daemon socket also remains blocked here (10013). WSL live discovery remains unverified due access denial. Claude subscription quota has no supported ordinary local source. Missing cache-write TTL, unpublished model rates, and unreported duration/outcome fields remain explicit partial/unavailable states.
+
+Public pricing is stored locally with an as-of date and source URLs in `src/server/pricing-registry.json`. API-equivalent estimates use [OpenAI pricing](https://developers.openai.com/api/docs/pricing) and [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing); they are not subscription invoices.
+
+### Loading this build
+
+The existing launcher and shortcut are preserved. Restart Agent Monitor normally to load the rebuilt backend and frontend; this implementation task did not launch or replace the running dashboard instance. Read [source investigation](SOURCE-INVESTIGATION.md) and [observer isolation](OBSERVER-SOURCES.md) for concrete limitations and recovery behavior.
+
+## Earlier initial-build record
+
 ## Scope and final instruction
 
 Implementation, tests, production build and local startup were initially authorized. The user subsequently instructed the agent to stop launching anything and keep the task to building. No further applications, browsers, shortcuts, or tests are to be launched under that instruction. Remaining work was limited to accurate project documentation.

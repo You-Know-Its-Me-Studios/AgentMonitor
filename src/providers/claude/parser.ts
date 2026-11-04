@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
-import { emptySession, emptyUsage, metric, sessionKey, type Activity, type Session, type ToolSummary, type Usage } from '../../shared/types.js';
+import { emptySession, emptyUsage, metric, sessionKey, type Activity, type Session, type ToolSummary, type Usage, type UsageSlice } from '../../shared/types.js';
+import type { RecordMeta } from '../../shared/adapter.js';
+import { normalizeTimestamp } from '../../shared/time.js';
+import { evidenceText, initialTaskEvidence, observeTaskEvidence, outputEvidence, taskEvidence, type TaskEvidenceState } from '../../server/task-evidence.js';
 
-type SavedResponse = { usage: Usage; at: string; turn: string | null; final: boolean; model: string | null };
-type SavedTool = { name: string; at: string | null; resultAt: string | null; outcome: 'success' | 'failure' | 'unknown'; editedFile: string | null; additions: number | null; deletions: number | null };
+type SavedResponse = { usage: Usage; at: string; turn: string | null; final: boolean; model: string | null;serviceTier?:string|null;cacheCreation5m?:number|null;cacheCreation1h?:number|null };
+type SavedTool = { name: string; at: string | null; resultAt: string | null; outcome: 'success' | 'failure' | 'unknown';phase?:'pending'|'in-flight'|'finished'|'interrupted'; editedFile: string | null; additions: number | null; deletions: number | null };
 export interface ClaudeState {
   nativeId: string; parentNativeId: string | null; source: string; cwd: string | null; branch: string | null;
   startedAt: string | null; lastActivityAt: string | null; model: string | null; effort: string | null;
@@ -12,16 +15,14 @@ export interface ClaudeState {
   activities: Activity[]; unknown: Record<string, number>; checklist: { completed: number; total: number } | null;
   checklistTiming: { ids: string[]; started: Record<string,string>; durations: Record<string,number> };
   tailObservedAt: string | null; nativeCost: { usd: number; modelNames: string[]; unknown: boolean } | null;
+  taskEvidence?:TaskEvidenceState;
 }
 
 export function cleanText(value: unknown, length = 160): string | null {
   if (typeof value !== 'string' || !value.trim()) return null;
   return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}/g, '[redacted]').replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]').replace(/\b(api[_-]?key|token|password|secret)\s*[:=]\s*\S+/gi, '$1 [redacted]').trim().slice(0, length);
 }
-export function iso(value: unknown): string | null {
-  if (typeof value !== 'number' && typeof value !== 'string') return null;
-  const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-}
+export function iso(value: unknown): string | null {return normalizeTimestamp(value);}
 function number(value: unknown): number | null { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null; }
 function nativeKey(value:unknown):string|null {return typeof value==='string'&&value.length>0&&value.length<=512&&!['__proto__','constructor','prototype'].includes(value)?value:null;}
 export function claudeUsage(raw: any, final = true): Usage {
@@ -31,7 +32,7 @@ export function claudeUsage(raw: any, final = true): Usage {
   return { input, output, cachedInput, cacheCreation, reasoning, total: input !== null && output !== null ? input + output + (cachedInput ?? 0) + (cacheCreation ?? 0) : null };
 }
 export function initialClaudeState(nativeId: string, source: string, parentNativeId: string | null = null): ClaudeState {
-  return { nativeId, source, parentNativeId, cwd: null, branch: null, startedAt: null, lastActivityAt: null, model: null, effort: null, explicitTitle: null, generatedTitle: null, summary: null, firstPrompt: null, forkedFrom: null, responses: {}, tools: {}, turns: {}, currentTurn: null, activities: [], unknown: {}, checklist: null, checklistTiming:{ids:[],started:{},durations:{}}, tailObservedAt: null, nativeCost: null };
+  return { nativeId, source, parentNativeId, cwd: null, branch: null, startedAt: null, lastActivityAt: null, model: null, effort: null, explicitTitle: null, generatedTitle: null, summary: null, firstPrompt: null, forkedFrom: null, responses: {}, tools: {}, turns: {}, currentTurn: null, activities: [], unknown: {}, checklist: null, checklistTiming:{ids:[],started:{},durations:{}}, tailObservedAt: null, nativeCost: null,taskEvidence:initialTaskEvidence(nativeId) };
 }
 function observeChecklist(state:ClaudeState,todos:any[],at:string|null) {
   const items=todos.filter(todo=>todo&&typeof todo.content==='string'&&['pending','in_progress','completed'].includes(todo.status));
@@ -49,11 +50,13 @@ function observeChecklist(state:ClaudeState,todos:any[],at:string|null) {
     }
   }
 }
-function addActivity(state: ClaudeState, activity: Activity) {
+function addActivity(state: ClaudeState, activity: Activity,meta?:RecordMeta&{ingestedAt?:string},originalTimestamp?:string|number) {
   const index = state.activities.findIndex(item => item.id === activity.id);
+  activity.occurredAt=activity.at;activity.ingestedAt=(index>=0?state.activities[index].ingestedAt:null)??meta?.ingestedAt??new Date().toISOString();activity.originalTimestamp=typeof originalTimestamp==='string'||typeof originalTimestamp==='number'?originalTimestamp:activity.at;
   if (index >= 0) state.activities[index] = activity; else state.activities.push(activity);
-  state.activities.sort((a,b) => a.at.localeCompare(b.at)); state.activities = state.activities.slice(-80);
+  state.activities.sort((a,b) => a.at.localeCompare(b.at)||a.id.localeCompare(b.id)); state.activities = state.activities.slice(-80);
 }
+function signal(state:ClaudeState,kind:Parameters<typeof observeTaskEvidence>[1]['kind'],text:unknown,at:string,id:string,meta?:RecordMeta&{ingestedAt?:string},status?:string,originalTimestamp?:string|number){state.taskEvidence??=initialTaskEvidence(state.nativeId);observeTaskEvidence(state.taskEvidence,{kind,text,source:state.source,occurredAt:at,nativeId:id,turnId:state.currentTurn,ingestedAt:meta?.ingestedAt,status,originalTimestamp});}
 function category(name: string): string {
   if (/edit|write|patch/i.test(name)) return 'File edits';
   if (/read|glob|grep|search/i.test(name)) return 'Read & search';
@@ -64,8 +67,8 @@ function category(name: string): string {
 }
 const knownIgnored = new Set(['api-request', 'api-request-shape', 'api-request-blob', 'session-owner', 'file-history-snapshot', 'queue-operation', 'progress', 'attachment', 'mode', 'permission-mode', 'atis-latch', 'last-prompt', 'tools-used', 'agent-name', 'agent-color', 'pr-link', 'saved_hook_context', 'hook-context', 'task-notification']);
 
-/** Retains numeric accounting and structural events only, never conversation or tool output. */
-export function reduceClaudeRecord(state: ClaudeState, record: any): void {
+/** Retains accounting and bounded public task evidence; private reasoning and raw tool output are excluded. */
+export function reduceClaudeRecord(state: ClaudeState, record: any,meta?:RecordMeta&{ingestedAt?:string}): void {
   if (!record || typeof record !== 'object' || typeof record.type !== 'string') return;
   const recordSession = typeof record.sessionId === 'string' ? record.sessionId : record.session_id;
   if (!state.parentNativeId && recordSession && recordSession !== state.nativeId) {
@@ -97,9 +100,11 @@ export function reduceClaudeRecord(state: ClaudeState, record: any): void {
   }
   if (record.type === 'system') {
     if (record.subtype === 'turn_duration' && number(record.durationMs) !== null && state.currentTurn) state.turns[state.currentTurn].durationMs = record.durationMs;
-    if (record.subtype === 'compact_boundary' && at) addActivity(state,{id: record.uuid ?? `compact:${at}`,at,kind:'compaction',label:'Context compacted'});
+    if (record.subtype === 'compact_boundary' && at) addActivity(state,{id: record.uuid ?? `compact:${at}`,at,kind:'compaction',label:'Context compacted'},meta,record.timestamp);
+    if(['turn_aborted','interrupted'].includes(record.subtype))for(const tool of Object.values(state.tools))if(!tool.resultAt)tool.phase='interrupted';
     return;
   }
+  if(record.type==='progress'&&at){const toolId=nativeKey(record.toolUseID??record.toolUseId??record.data?.toolUseId);if(toolId&&state.tools[toolId]&&['bash_progress','tool_progress'].includes(record.data?.type)){state.tools[toolId].phase='in-flight';signal(state,'tool',`${state.tools[toolId].name}: native progress reported`,at,`progress:${toolId}:${record.uuid??at}`,meta,'in-flight',record.timestamp);}return;}
   if (record.type === 'user') {
     const content = record.message?.content;
     const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter((part:any)=>part.type==='text').map((part:any)=>part.text).join(' ') : '';
@@ -108,13 +113,14 @@ export function reduceClaudeRecord(state: ClaudeState, record: any): void {
       const id = nativeKey(record.uuid) ?? `user:${at}`;
       if (!state.turns[id]) { state.turns[id] = {startedAt:at,durationMs:null}; state.currentTurn=id; }
       state.firstPrompt ||= cleanText(text, 90);
-      addActivity(state,{id:`turn:${id}`,at,kind:'turn',label:'User turn started'});
+      addActivity(state,{id:`turn:${id}`,at,kind:'turn',label:'User turn started'},meta,record.timestamp);signal(state,'request',text,at,id,meta,'user-input',record.timestamp);
     }
     if (Array.isArray(content)) for (const part of content) {
       if (part.type !== 'tool_result' || !nativeKey(part.tool_use_id)) continue;
       const tool = state.tools[part.tool_use_id]; if (!tool) continue;
       tool.outcome = part.is_error === true ? 'failure' : part.is_error === false ? 'success' : 'unknown';
       tool.resultAt = at;
+      tool.phase=record.toolUseResult?.interrupted===true?'interrupted':'finished';
       const result = record.toolUseResult;
       if (result && typeof result === 'object' && tool.editedFile) {
         const patch = result.structuredPatch;
@@ -124,7 +130,7 @@ export function reduceClaudeRecord(state: ClaudeState, record: any): void {
           tool.additions=adds;tool.deletions=dels;
         }
       }
-      if (at) addActivity(state,{id:`tool:${part.tool_use_id}`,at,kind:tool.editedFile?'edit':'tool',label:tool.name,detail:tool.editedFile??undefined,outcome:tool.outcome});
+      if (at){addActivity(state,{id:`tool:${part.tool_use_id}`,at,kind:tool.editedFile?'edit':'tool',label:tool.name,detail:tool.editedFile??undefined,outcome:tool.outcome},meta,record.timestamp);const summary=Array.isArray(part.content)?part.content.filter((part:any)=>part.type==='text').map((part:any)=>part.text).join('\n'):part.content;signal(state,tool.outcome==='failure'?'blocker':'result',outputEvidence(summary)||`${tool.name} returned; ${tool.outcome==='unknown'?'outcome unavailable':tool.outcome}`,at,`${part.tool_use_id}:result`,meta,tool.outcome,record.timestamp);}
     }
     return;
   }
@@ -137,17 +143,20 @@ export function reduceClaudeRecord(state: ClaudeState, record: any): void {
     const final = record.isPartial !== true && record.provisional !== true && (hasStopReason || (outputCount!==null && outputCount>1));
     if (id && message.usage && at && !record.isApiErrorMessage) {
       const previous=state.responses[id];
-      if (!previous || final || !previous.final) state.responses[id]={usage:claudeUsage(message.usage,final),at,turn:previous?.turn??state.currentTurn,final,model:state.model};
+      if (!previous || final || !previous.final) state.responses[id]={usage:claudeUsage(message.usage,final),at,turn:previous?.turn??state.currentTurn,final,model:typeof message.model==='string'?cleanText(message.model):null,serviceTier:cleanText(message.usage.service_tier,80),cacheCreation5m:number(message.usage.cache_creation?.ephemeral_5m_input_tokens),cacheCreation1h:number(message.usage.cache_creation?.ephemeral_1h_input_tokens)};
     }
+    if(at&&Array.isArray(message.content)){const publicText=message.content.filter((part:any)=>part.type==='text').map((part:any)=>part.text??'').join('\n');if(publicText)signal(state,message.stop_reason==='end_turn'?'summary':'progress',publicText,at,`${id??record.uuid??at}:text`,meta,message.stop_reason==='end_turn'?'native-final':'public-update',record.timestamp);}
     if (Array.isArray(message.content)) for(const part of message.content) {
       if (part.type!=='tool_use' || !nativeKey(part.id) || typeof part.name!=='string') continue;
       if (!state.tools[part.id]) {
         const editedFile=/^(?:Edit|Write|MultiEdit|NotebookEdit)$/i.test(part.name)?cleanText(part.input?.file_path??part.input?.notebook_path,2048):null;
-        state.tools[part.id]={name:cleanText(part.name,120)??'Tool',at,resultAt:null,outcome:'unknown',editedFile,additions:null,deletions:null};
+        state.tools[part.id]={name:cleanText(part.name,120)??'Tool',at,resultAt:null,outcome:'unknown',editedFile,additions:null,deletions:null,phase:'pending'};
       }
       const tool=state.tools[part.id];
-      if (part.name==='TodoWrite' && Array.isArray(part.input?.todos)) observeChecklist(state,part.input.todos,at);
-      if (at) addActivity(state,{id:`tool:${part.id}`,at,kind:tool.editedFile?'edit':'tool',label:tool.name,detail:tool.editedFile??undefined,outcome:tool.outcome});
+      if (part.name==='TodoWrite' && Array.isArray(part.input?.todos)){observeChecklist(state,part.input.todos,at);if(at)signal(state,'plan',part.input.todos.filter(Boolean).map((todo:any)=>`${todo.status??'unknown'}: ${evidenceText(todo.content,500)}`).join('\n'),at,part.id,meta,'reported-checklist',record.timestamp);}
+      if(at&&['TaskCreate','TaskUpdate'].includes(part.name))signal(state,'plan',`${part.name}: ${evidenceText(part.input?.subject??part.input?.taskId,300)} ${evidenceText(part.input?.status,80)}`,at,part.id,meta,'reported-task-list',record.timestamp);
+      if(at&&['Task','Agent'].includes(part.name))signal(state,'subagent',`${part.name}: ${evidenceText(part.input?.description,300)}\n${evidenceText(part.input?.prompt,1000)}`,at,part.id,meta,'assignment',record.timestamp);
+      if (at){addActivity(state,{id:`tool:${part.id}`,at,kind:tool.editedFile?'edit':'tool',label:tool.name,detail:tool.editedFile??undefined,outcome:tool.outcome},meta,record.timestamp);signal(state,'tool',`${tool.name}${part.input?.command?`: ${evidenceText(part.input.command,700)}`:tool.editedFile?`: ${tool.editedFile}`:''}; invocation recorded`,at,part.id,meta,'pending',record.timestamp);}
     }
     return;
   }
@@ -179,6 +188,9 @@ export function claudeSession(state: ClaudeState, namespace: string, now: string
   const reason=!complete?'Progressive backfill: totals cover the observed portion of this transcript':provisional?'Output contains an unfinished response; its placeholder count is unavailable':undefined;
   session.usage=metric(responses.length?usage:null,state.source,'main agent; locally attributable responses',reason?'derived':responses.length?'reported':'unavailable',reason??'Cache read and cache creation are separate from uncached input',state.lastActivityAt??now);
   session.turnUsage=metric(turnResponses.length?sumClaudeUsage(turnResponses):null,state.source,'current user turn',turnResponses.length?(!complete?'derived':'reported'):'unavailable',!complete?'Progressive backfill: only explicitly correlated responses in the observed portion are included':undefined,state.lastActivityAt??now);
+  const slices=new Map<string,UsageSlice>();
+  for(const response of responses){const key=`${response.model??''}:${response.serviceTier??''}`,old=slices.get(key);const aggregate=(a:number|null|undefined,b:number|null|undefined)=>a!==null&&a!==undefined&&b!==null&&b!==undefined?a+b:null;slices.set(key,{model:response.model,serviceTier:response.serviceTier??null,usage:old?sumClaudeUsage([{...response,usage:old.usage},response]):response.usage,cacheCreation5m:old?aggregate(old.cacheCreation5m,response.cacheCreation5m):response.cacheCreation5m??null,cacheCreation1h:old?aggregate(old.cacheCreation1h,response.cacheCreation1h):response.cacheCreation1h??null});}session.usageBreakdown=[...slices.values()];
+  session.task=taskEvidence(state.taskEvidence,complete?'Public task evidence recovered from the native transcript.':'Observed prefix and recent public task evidence; historical backfill is incomplete.');session.agentRole=state.parentNativeId?'implementation':'unknown';
   // Request tokens are useful evidence but are not an authoritative current-context gauge.
   const last=responses.at(-1);
   if(last && last.usage.input!==null) session.context.used=metric(last.usage.input+(last.usage.cachedInput??0)+(last.usage.cacheCreation??0),state.source,'latest API request input','estimated','Latest request input including cache; context may have changed since',last.at);
@@ -187,7 +199,8 @@ export function claudeSession(state: ClaudeState, namespace: string, now: string
   for(const tool of Object.values(state.tools)) {
     const summary=tools.get(tool.name)??{name:tool.name,category:category(tool.name),calls:0,succeeded:0,failed:0,unknown:0,durationMs:null,retries:null};
     summary.calls++;if(tool.outcome==='success')summary.succeeded++;else if(tool.outcome==='failure')summary.failed++;else summary.unknown++;
-    if(tool.at && tool.resultAt) summary.durationMs=(summary.durationMs??0)+Math.max(0,Date.parse(tool.resultAt)-Date.parse(tool.at));
+    if(tool.at && tool.resultAt){const elapsed=Date.parse(tool.resultAt)-Date.parse(tool.at);if(elapsed>0)summary.durationMs=(summary.durationMs??0)+elapsed;}
+    if(tool.phase==='in-flight')summary.inFlight=(summary.inFlight??0)+1;if(tool.phase==='interrupted')summary.interrupted=(summary.interrupted??0)+1;
     tools.set(tool.name,summary);
   }
   session.tools=[...tools.values()].sort((a,b)=>b.calls-a.calls);

@@ -28,6 +28,7 @@ export function validateAssessment(value: unknown, evidenceIds: Iterable<string>
   if (!states.includes(data.taskState as typeof states[number]) || !confidence.includes(data.confidence as typeof confidence[number])) return fail('Observer task state or confidence is invalid.');
   const min = seconds('etaMinSeconds'), max = seconds('etaMaxSeconds');
   if ((min === null) !== (max === null) || (min !== null && max !== null && min > max)) return fail('Observer ETA must be a complete, ordered range.');
+  if (data.taskState === 'active' && min === null) return fail('An active recovered task requires a finite estimated remaining-work range.');
   if (['complete','idle','paused'].includes(data.taskState as string) && min !== null) return fail('Completed, idle, or paused tasks cannot have an active ETA.');
   const known = new Set(evidenceIds); const ids = strings('supportingEvidenceIds',24,512);
   if (ids.some(id => !known.has(id)) || new Set(ids).size !== ids.length || (known.size > 0 && !ids.length)) return fail('Observer references missing, duplicate, or unknown evidence IDs.');

@@ -27,9 +27,21 @@ export class Collector extends EventEmitter {
       session.state = metric('unknown', 'dashboard cache', 'runtime', 'stale', 'Rechecking runtime after dashboard restart');
     }
   }
-  async start(): Promise<void> { this.stopped = false; await this.reconcile(); this.schedule(); }
+  async start(): Promise<void> { this.stopped = false; await this.safeReconcile(); this.schedule(); }
+  private async safeReconcile(): Promise<void> {
+    try { await this.reconcile(); }
+    catch {
+      const at = new Date().toISOString();
+      this.current = { ...this.current, revision: this.current.revision + 1, collecting: false, diagnostics: [...this.current.diagnostics.filter(d => d.code !== 'collector-reconcile-failed'), { code: 'collector-reconcile-failed', level: 'error', message: 'Native-source reconciliation or local cache update failed. Existing observations are retained and collection will retry.', at }] };
+      for (const session of this.current.sessions) {
+        session.runtime.reachable = false; session.runtime.loaded = false; session.state.provenance.quality = 'stale';
+        session.collection = { lastCheckedAt: at, ingestedAt: session.collection?.ingestedAt || null, evidenceAt: session.lastActivityAt, condition: 'unavailable', reason: 'Collection failed; the next bounded reconciliation will retry' };
+      }
+      this.emit('snapshot', this.current);
+    }
+  }
   setObserver(observer: ObserverSnapshot): void { this.current = { ...this.current, revision: this.current.revision + 1, observer }; this.store.saveSnapshot(this.current); this.emit('snapshot', this.current); }
-  private schedule(): void { if (!this.stopped) this.timer = setTimeout(() => { this.pending = this.reconcile().finally(() => this.schedule()); }, Math.max(750, this.config.pollMs || 2000)); }
+  private schedule(): void { if (!this.stopped) this.timer = setTimeout(() => { this.pending = this.safeReconcile().finally(() => this.schedule()); }, Math.max(750, this.config.pollMs || 2000)); }
   async reconcile(): Promise<void> {
     if (Date.now() >= this.refreshAt) {
       const discovery = await discoverRoots(this.config);
@@ -94,7 +106,7 @@ export class Collector extends EventEmitter {
       if (previous) previous.count++; else distinct.set(key, { diagnostic, count: 1 });
     }
     const conciseDiagnostics = [...distinct.values()].map(({ diagnostic, count }) => count > 1 ? { ...diagnostic, message: `${diagnostic.message} (${count} sources)` } : diagnostic);
-    this.current = sanitize({ revision: this.current.revision + 1, observedAt: now, collecting: false, sessions: [...sessions.values()].sort((a, b) => Date.parse(b.lastActivityAt || '') - Date.parse(a.lastActivityAt || '') || a.id.localeCompare(b.id)), allowances: [...allowances.values()], diagnostics: conciseDiagnostics, observer: this.current.observer });
+    this.current = sanitize({ revision: this.current.revision + 1, observedAt: now, collecting: false, sessions: [...sessions.values()].sort((a, b) => Date.parse(b.lastActivityAt || '') - Date.parse(a.lastActivityAt || '') || a.id.localeCompare(b.id)), allowances: [...allowances.values()], diagnostics: conciseDiagnostics, observer: this.current.observer, build: this.current.build });
     this.store.saveSnapshot(this.current);
     this.emit('snapshot', this.current);
   }

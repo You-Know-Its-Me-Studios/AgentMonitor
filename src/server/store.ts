@@ -21,6 +21,7 @@ export class CacheStore {
   saveSnapshot(snapshot: Snapshot): void { this.db.prepare("INSERT INTO app_state(key,value) VALUES ('snapshot',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(sanitize(snapshot))); }
   readState<T>(key: string): T | null { const row = this.db.prepare('SELECT value FROM app_state WHERE key=?').get(key) as { value: string } | undefined; return row ? JSON.parse(row.value) : null; }
   writeState(key: string, value: unknown): void { this.db.prepare('INSERT INTO app_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(sanitize(value))); }
+  listState<T>(prefix: string, limit = 50): T[] { return (this.db.prepare('SELECT value FROM app_state WHERE substr(key,1,?)=? ORDER BY rowid DESC LIMIT ?').all(prefix.length, prefix, Math.max(1, Math.min(limit, 100))) as { value: string }[]).map(row => JSON.parse(row.value)); }
   migrateReducers(version: string): void {
     if (this.readState<string>('reducer-version') === version) return;
     this.db.exec('BEGIN IMMEDIATE');

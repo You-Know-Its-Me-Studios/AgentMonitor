@@ -25,13 +25,15 @@ export interface ObserverAssessment extends AssessmentContent {
   assessedAt: string; evidenceThrough: string; provider: Provider; model: string;
   durationMs: number; usage: Usage | null;
 }
-export interface ObserverFailure { code: 'authentication' | 'timeout' | 'invalid-output' | 'provider-error' | 'unavailable' | 'evidence-unavailable' | 'superseded'; message: string; at: string }
+export interface ObserverFailure { code: 'authentication' | 'timeout' | 'invalid-output' | 'provider-error' | 'unavailable' | 'evidence-unavailable' | 'superseded'; message: string; at: string; provider?: Provider; source?: string }
 export interface ObserverSessionState {
   sessionId: string; taskId: string | null; inProgress: boolean; requestedAt: string | null;
+  queued?: boolean;
+  taskRevision?: number;
   nextRefreshAt: string | null; assessment: ObserverAssessment | null; failure: ObserverFailure | null;
   usage: Usage | null; runs: number;
 }
-export interface ObserverCapabilities { provider: Provider; available: boolean; version: string | null; models: string[]; efforts: string[]; reason?: string }
+export interface ObserverCapabilities { provider: Provider; available: boolean; version: string | null; models: string[]; efforts: string[]; modelEfforts?: Record<string, string[]>; defaultModel?: string; reason?: string }
 export interface ObserverSnapshot {
   settings: ObserverSettings; selectedSessionId: string | null; sessions: Record<string, ObserverSessionState>;
   capabilities: ObserverCapabilities[];

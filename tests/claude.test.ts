@@ -169,4 +169,8 @@ describe('Claude automatic discovery',()=>{
     fixture.setListing([{id:'job-abc',sessionId:id,kind:'background',state:'working',name:'Full native name'}]);fixture.advance();
     result=await adapter.poll(fixture.context);expect(result.sessions).toHaveLength(1);expect(result.sessions[0].nativeId).toBe(id);
   });
+  it('excludes tagged observer runs from both native listing and transcript placeholders',async()=>{
+    const fixture=fixtureContext(),adapter=createClaudeAdapter();fixture.files.set(`/fixture/projects/observer/${id}.jsonl`,JSON.stringify({type:'user',sessionId:id,uuid:'u',timestamp:at,cwd:'/work/.agent-monitor/observer/run-test',message:{content:'Internal observer instructions'}})+'\n');fixture.setListing([{sessionId:id,pid:7,status:'busy',cwd:'/work/.agent-monitor/observer/run-test',name:'Internal observer'}]);
+    const result=await adapter.poll(fixture.context);expect(result.sessions).toEqual([]);
+  });
 });
