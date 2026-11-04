@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { limitSessionTabs, nextTabIndex } from '../src/client/presentation.js';
 import { sessionTabs } from '../src/client/ui-model.js';
-import { emptySession } from '../src/shared/types.js';
+import { emptySession, metric } from '../src/shared/types.js';
 
 describe('wrapped active-session navigation', () => {
   it('limits many active tabs, preserves selected identity across native renames, and keeps histories out of default tabs', () => {
-    const sessions = Array.from({ length: 30 }, (_, i) => { const s = emptySession('codex', 'native', `session-${i}`, 'fixture'); s.runtime.reachable = true; s.name = `Native ${i}`; return s; });
+    const sessions = Array.from({ length: 30 }, (_, i) => { const s = emptySession('codex', 'native', `session-${i}`, 'fixture'); s.runtime.reachable = true; s.runtime.loaded = true; s.state = metric('idle', 'native runtime', 'runtime'); s.name = `Native ${i}`; return s; });
     const historical = emptySession('codex', 'native', 'historical', 'fixture');
     const eligible = sessionTabs([...sessions, historical], sessions[29].id, Date.now());
     const limited = limitSessionTabs(eligible, sessions[29].id, 6);

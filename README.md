@@ -2,48 +2,96 @@
 
 A local, passive dashboard for existing Codex CLI and Claude Code sessions. Start the dashboard once and continue launching your agents normally. It does not resume, attach, submit input, change agent settings, or launch a provider daemon.
 
-## Start on Windows
+## Requirements
 
-The production launcher is:
+- Windows 11 with its built-in Windows PowerShell.
+- Node.js **22.13 or newer on a supported LTS release**, with **npm 10 or newer**. Install Node with its npm component; `node` and `npm` must be on `PATH`.
+- Codex CLI or Claude Code already installed and used normally. The dashboard uses their existing local session sources and CLI-owned authentication.
+- Internet access for the first dependency installation and later dependency updates. Routine metric collection is local; enabled AI assessments use the selected provider as described below.
+
+Git is needed only for the clone/update route. No administrator access, system service, firewall change, Docker, API key, or `.env` file is required.
+
+## Get a copy and start
+
+Choose a permanent, writable application folder. Paths containing spaces are supported.
+
+### Clone with Git
+
+Open PowerShell in the parent folder where you want the application:
+
+```powershell
+git clone https://github.com/You-Know-Its-Me-Studios/AgentMonitor.git "Agent-Monitor"
+Set-Location -LiteralPath ".\Agent-Monitor"
+.\Start-AgentMonitor.cmd
+```
+
+### Download ZIP
+
+1. Download the repository ZIP and use Windows **Extract All** to unpack it into a permanent folder.
+2. Open the extracted application folder containing `package.json`, `README.md`, and `Start-AgentMonitor.cmd`. The ZIP may contain an additional outer folder.
+3. Double-click **Start-AgentMonitor.cmd**. From a terminal already in that folder, the equivalent command is:
 
 ```powershell
 .\Start-AgentMonitor.cmd
 ```
 
-Dashboard: **http://127.0.0.1:4317**
+Git clones and GitHub **Code → Download ZIP** are source downloads. They do not contain installed dependencies or compiled output. There is no packaged executable or executable installer; the included launcher prepares the source on first use.
 
-A ready-to-copy **Agent Monitor.lnk** is included in this folder. The shortcut starts the production Node server hidden, waits for readiness, and opens your default browser. It compares the running server with `dist/build.json`: repeated launches reuse the same build, while a newly rebuilt version replaces the verified stale dashboard before opening. Codex and Claude processes are untouched. It works without a development terminal and after reboot; it does not auto-start on login. Its target is the local hidden launcher, and its icon is bundled in `scripts/agent-monitor.ico`.
+On first launch, `scripts/Setup-AgentMonitor.ps1` checks Node/npm, installs the locked dependencies with `npm ci`, creates the production build, and attempts to create a Desktop shortcut for this copy. Later launches install again when dependency inputs change and rebuild when application source or build inputs change. Content fingerprints detect ZIP updates without relying on file dates. Setup uses this copy's folder; no original developer paths are needed. Installation/build progress and failures are recorded in `.agent-monitor\logs\setup.log`.
 
-The Desktop installation was blocked by this session's filesystem sandbox. **No Desktop shortcut was installed.** The installer targets the current user's resolved Desktop (`%USERPROFILE%\Desktop\Agent Monitor.lnk` unless Windows redirects it).
+The launcher starts the local backend, waits for readiness, and opens **http://127.0.0.1:4317** in your browser. Existing sessions appear automatically. Continue starting Codex and Claude normally; there is no subsequent session connection step.
 
-To recreate the shortcut after moving this folder:
+Repeated launches reuse the matching running dashboard. After a rebuild, the launcher verifies and replaces the older dashboard instance for this exact folder before opening the new build. Provider processes are untouched. Startup failures identify logs under `.agent-monitor\logs`.
+
+### Create a Desktop shortcut
+
+Generate a shortcut on the computer that will run the application:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-DesktopShortcut.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-DesktopShortcut.ps1
 ```
 
-Keep this application folder and its `node_modules` and `dist` folders. Node.js 22.13 or a newer supported even-numbered LTS release must be installed. Startup errors show the log location under `.agent-monitor\logs`. There are no administrator, service, firewall, Docker, API key, or cloud requirements.
+This creates **Agent Monitor.lnk** on the current user's Desktop and points it to this application folder. A shortcut is machine- and folder-specific; recreate it after moving the folder or changing computers. Do not distribute an existing `.lnk` from another installation. The local PowerShell/VBScript launchers and bundled icon support the shortcut; this project does not provide an executable installer or a system service. Nothing is added to Windows startup.
 
-## Build and development
+## Update an installation
+
+For a Git clone, open PowerShell in its application folder:
+
+```powershell
+git pull --ff-only
+.\Start-AgentMonitor.cmd
+```
+
+Keep local configuration and `.agent-monitor` data in place. Setup applies `npm ci` when the dependency installation or lockfile inputs change, rebuilds changed source, and the launcher selects the matching dashboard build. Git may require you to resolve your own source edits before pulling; the launcher does not discard them.
+
+For a ZIP update, stop the old dashboard as described below, extract the new ZIP into a new permanent folder, and start that folder's `Start-AgentMonitor.cmd`. Copy your local `agent-monitor.config.json` if you use one. To retain dashboard history and observer settings, copy `.agent-monitor/cache.sqlite` and any matching `cache.sqlite-wal` / `cache.sqlite-shm` files only after the old dashboard has stopped. Do not copy old process/instance records, `node_modules`, or `dist`; the new copy prepares its own installation. Recreate the Desktop shortcut from the new folder.
+
+## Manual setup and development
+
+To prepare dependencies and the production build without opening the dashboard:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Setup-AgentMonitor.ps1
+```
+
+The direct development commands are:
 
 ```powershell
 npm ci
-npm run typecheck
-npm test
 npm run build
 npm start
 ```
 
-`npm run dev` builds and watches the compiled backend. Run `npm run build` after source edits to refresh it. The production build fingerprints backend and frontend together. Open the shortcut after rebuilding to load that exact build. `npm run dev:ui` watches frontend assets only; run the complete production build before using the shortcut. The production frontend and API share one loopback origin.
+`npm ci` reproduces `package-lock.json`; rerun it after dependency/lockfile changes. Rebuild after source changes. `npm start` starts the compiled server in the terminal; open its localhost address yourself. `npm run dev` builds and watches the compiled backend. `npm run dev:ui` watches frontend assets only. The production frontend and API share one loopback origin.
 
-Browser verification commands and results are recorded in [verification](docs/VERIFICATION.md). Parser, accounting, file-lifecycle, discovery, API security, launcher, and browser tests use isolated synthetic provider roots. No test mutates your provider history.
+Past verification procedures and results are recorded in [verification](docs/VERIFICATION.md). Setup and ordinary startup do not run the test suite.
 
 ## What appears
 
 - Existing and newly created native sessions, with stable identities and native names. Renames update the existing tab and selected browser title. New sessions do not steal selection. Refresh preserves selection.
 - Model, reported effort, project, branch, cwd, timings, activity, reported tokens, cached input, reasoning where available, tool outcomes, attributable edits, and child-agent usage.
 - Separate context occupancy, current-turn consumption, lifetime consumption, and shared account allowance windows. Unknown metrics remain unavailable. Expired allowance snapshots remain stale until a fresh observation arrives.
-- Searchable local history, archived sessions, source diagnostics, and provenance tooltips. Subagents are nested beneath their parent.
+- Searchable local history, archived sessions, and provenance tooltips. Subagents are nested beneath their parent.
 - Source-aware runtime labels and visible subagent activity timestamps. A recent transcript is labeled activity evidence rather than verified Running. Recent activity is one newest-first timeline. Session tabs wrap within their space, with explicit access to additional sessions instead of an empty inner scrollbar.
 - A separate AI observer assesses the selected current task: objective, stage, remaining work, a time range, confidence, basis, blockers and evidence references. An initial rough estimate does not require historical samples. Conversation age is kept separate from current-task elapsed time.
 
@@ -67,7 +115,13 @@ Default roots are `%USERPROFILE%\.codex` and `%USERPROFILE%\.claude`; discoverab
 
 On Windows, only distributions reported by `wsl --list --running --quiet` are inspected. Read-only bounded Python 3 helpers run in their Linux user namespace. Stopped distributions are skipped. WSL access failures are visible in Diagnostics; native Windows observation continues.
 
-For an accessible custom root that cannot be discovered from this process's environment, optionally create `agent-monitor.config.json` in this folder:
+Default settings require no configuration file. For a custom port or an accessible source root that cannot be discovered from this process's environment, copy the included template once, then edit your local copy:
+
+```powershell
+Copy-Item -LiteralPath .\agent-monitor.config.example.json -Destination .\agent-monitor.config.json
+```
+
+The template uses port `4317`, a two-second collection interval, WSL discovery enabled, and no additional roots. Add only roots you need. This example illustrates the supported fields; replace the WSL placeholders with your own running distribution and Linux user:
 
 ```json
 {
@@ -76,12 +130,12 @@ For an accessible custom root that cannot be discovered from this process's envi
   "wsl": true,
   "roots": [
     { "provider": "codex", "path": "D:/Agent Data/codex" },
-    { "provider": "claude", "path": "/home/josh/.claude", "distro": "Ubuntu", "user": "josh" }
+    { "provider": "claude", "path": "/home/YOUR_LINUX_USER/.claude", "distro": "YOUR_DISTRO", "user": "YOUR_LINUX_USER" }
   ]
 }
 ```
 
-Restart the dashboard after editing its configuration. Arbitrary roots hidden only in another process's private environment cannot be guaranteed. This setting adds source directories; it never connects to or controls an individual session.
+Do not overwrite an existing local configuration when updating. Restart only the dashboard after changing it. Ports must be from `1024` to `65535`; a configured port changes the localhost address accordingly. Arbitrary roots hidden only in another process's private environment cannot be guaranteed. This setting adds source directories; it never connects to or controls an individual session.
 
 ## Privacy and limitations
 
@@ -101,4 +155,6 @@ Claude subscription allowance has no supported ordinary discovery interface here
 - [Missing-data and timestamp investigation](docs/SOURCE-INVESTIGATION.md)
 - [Timestamp normalization and timezone regressions](docs/TIMESTAMPS.md)
 
-To stop the dashboard, end its Node process in Task Manager (its command line ends in this folder's `dist\server\main.js`). This has no effect on Codex or Claude processes. There is deliberately no provider-control API.
+## Stop the dashboard
+
+Closing its browser tab leaves monitoring running. If you used `npm start`, press **Ctrl+C** in that terminal. For a shortcut-launched instance, open Task Manager's **Details** tab, enable the **Command line** column, and end only the `node.exe` process whose command line names this installation's `dist\server\main.js`. Do not end every Node, Codex, or Claude process. Stopping the dashboard does not stop the monitored sessions. There is deliberately no provider-control API.

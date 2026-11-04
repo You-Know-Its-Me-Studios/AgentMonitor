@@ -2,11 +2,12 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import type { KeyboardEvent, ReactNode } from 'react';
 import type { Allowance, Diagnostic, Metric, Session, Snapshot } from '../shared/types.js';
 import type { ObserverSnapshot } from '../shared/observer.js';
-import { compareTimestamps, compareTimestampsNewestFirst, epochMilliseconds, formatTimestamp, relativeAge } from '../shared/time.js';
+import { compareTimestamps, epochMilliseconds, formatTimestamp, relativeAge } from '../shared/time.js';
 import TimingPanel from './TimingPanel.js';
-import { defaultSelection, hasRecentActiveEvidence, observerRequest, sessionTabs } from './ui-model.js';
+import { defaultSelection, filteredSessionCollection, observerRequest, sessionTabs, type SessionFilters } from './ui-model.js';
 import { browserAuthorizationRevision, localFetch } from './http.js';
 import { chronologicalActivities, limitSessionTabs, nextTabIndex, reportedActivityAt, runtimePresentation } from './presentation.js';
+import { sessionEligibility } from '../shared/lifecycle.js';
 
 const SELECTION_KEY = 'agent-monitor.selected-session';
 const n = new Intl.NumberFormat('en-US');
@@ -65,17 +66,17 @@ function Icon({ name, size = 18, className = '' }: { name: string; size?: number
 export function Status({ session, small = false, now = Date.now(), diagnostics = [] }: { session: Session; small?: boolean; now?: number; diagnostics?: Diagnostic[] }) {
   const { when, provenance } = useTimes();
   const view = runtimePresentation(session, now, diagnostics);
-  const age = view.label === 'Activity observed' && view.evidenceAt ? relative(view.evidenceAt, now) : null;
+  const age = ['Activity observed', 'Recorded turn open', 'Task recorded active'].includes(view.label) && view.evidenceAt ? relative(view.evidenceAt, now) : null;
   const timestamp = view.evidenceAt ? `Source activity ${when(view.evidenceAt, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : 'No activity timestamp reported';
   return <span className={`status state-${view.tone}${small ? ' small' : ''}`} title={`${view.detail}\n${timestamp}\n${provenance(session.state)}`}><span className="status-dot" />{view.label}{age && <span className="status-age"> · {age}</span>}</span>;
 }
 function Card({ title, icon, children, className = '', action, hint }: { title: string; icon: string; children: ReactNode; className?: string; action?: ReactNode; hint?: string }) {
   return <section className={`card ${className}`} aria-label={title}><div className="card-heading"><h2><Icon name={icon} />{title}</h2>{action ?? (hint ? <span className="info-tip" tabIndex={0} title={hint} data-tooltip={hint} aria-label={hint}><Icon name="info" size={15} /></span> : null)}</div>{children}</section>;
 }
-function Gauge({ percent, value, label, color = 'green', title, stale = false }: { percent: number | null; value: string; label: string; color?: string; title: string; stale?: boolean }) {
-  const measured = isKnown(percent);
-  const safe = measured ? Math.min(100, Math.max(0, percent)) : 0;
-  return <div className={`gauge ${color}${measured ? '' : ' unavailable'}${stale ? ' stale' : ''}`} title={title} role="img" aria-label={`${label}: ${value}${measured ? `, ${Math.round(safe)} percent` : ', unavailable'}`}>
+function Gauge({ percent, value, label, color = 'green', title, stale = false, unavailableReason, unavailableLabel = 'Not reported' }: { percent: number | null; value: string; label: string; color?: string; title: string; stale?: boolean; unavailableReason?: string; unavailableLabel?: string }) {
+  if (percent === null || !Number.isFinite(percent) || percent < 0 || percent > 100) return <div className={`gauge gauge-condition ${color}`} title={title} role="status"><div><strong>{unavailableLabel}</strong><p>{unavailableReason || 'The native source has not reported a valid percentage.'}</p></div></div>;
+  const safe = Math.min(100, Math.max(0, percent));
+  return <div className={`gauge ${color}${stale ? ' stale' : ''}`} title={title} role="img" aria-label={`${label}: ${value}, ${Math.round(safe)} percent`}>
     <svg viewBox="0 0 200 200" aria-hidden="true"><circle className="gauge-track" cx="100" cy="100" r="80" /><circle className="gauge-fill" cx="100" cy="100" r="80" pathLength="100" strokeDasharray={`${safe} 100`} transform="rotate(-90 100 100)" /></svg>
     <div className="gauge-value"><strong>{value}</strong><span>{label}</span></div>
   </div>;
@@ -89,11 +90,12 @@ function Empty({ icon = 'info', title, detail, compact: small = false }: { icon?
 function ContextCard({ session }: { session: Session }) {
   const { provenance } = useTimes();
   const { used, capacity } = session.context;
-  const percent = isKnown(used.value) && isKnown(capacity.value) && capacity.value > 0 ? used.value / capacity.value * 100 : null;
+  const percent = isKnown(used.value) && used.value >= 0 && isKnown(capacity.value) && capacity.value > 0 && used.value <= capacity.value ? used.value / capacity.value * 100 : null;
+  const unavailableReason = !isKnown(used.value) || used.value < 0 ? used.provenance.reason || 'Context occupancy is not reported.' : !isKnown(capacity.value) || capacity.value <= 0 ? capacity.provenance.reason || 'A positive context capacity has not been reported.' : 'Reported context occupancy exceeds the reported capacity.';
   return <Card title="Context window" icon="context" className="context-card" hint="Current context occupancy is separate from lifetime token usage. A ring is drawn only when both occupancy and capacity are reported.">
-    <Gauge percent={percent} value={percent === null ? '—' : `${Math.round(percent)}%`} label={percent === null ? 'Not reported' : 'context used'} color={percent !== null && percent > 85 ? 'amber' : 'green'} title={`${provenance(used)}\n${provenance(capacity)}`} stale={used.provenance.quality === 'stale'} />
+    <Gauge percent={percent} value={percent === null ? '—' : `${Math.round(percent)}%`} label={percent === null ? 'Not reported' : 'context used'} color={percent !== null && percent > 85 ? 'amber' : 'green'} title={`${provenance(used)}\n${provenance(capacity)}`} stale={used.provenance.quality === 'stale'} unavailableLabel="Context unavailable" unavailableReason={unavailableReason} />
     <div className="gauge-caption"><strong>{short(used.value)}</strong><span>of {short(capacity.value)} tokens</span></div>
-    <p className="card-footnote">{percent === null ? used.provenance.reason ?? 'The source does not report context occupancy.' : used.provenance.quality === 'stale' ? 'Last reported snapshot · stale' : 'Latest reported context snapshot'}</p>
+    <p className="card-footnote">{percent === null ? unavailableReason : used.provenance.quality === 'stale' ? 'Last reported snapshot · stale' : 'Latest reported context snapshot'}</p>
   </Card>;
 }
 function TokensCard({ session }: { session: Session }) {
@@ -119,12 +121,12 @@ function AllowanceCard({ allowances, session, now }: { allowances: Allowance[]; 
   const used = main?.usedPercent.value;
   const reset = epochMilliseconds(main?.resetsAt);
   const stale = main?.usedPercent.provenance.quality === 'stale' || (reset !== null && reset <= now);
-  const remaining = isKnown(used) ? Math.max(0, 100 - used) : null;
+  const remaining = isKnown(used) && used >= 0 && used <= 100 ? 100 - used : null;
   return <Card title="Account allowance" icon="allowance" className="allowance-card" hint="Allowances belong to the provider account and are shared across sessions. Expired snapshots remain stale until the provider reports fresh data.">
     {main ? <>
-      <div className="allowance-main"><Gauge percent={remaining} value={remaining === null ? '—' : `${Math.round(remaining)}%`} label={stale ? 'last known remaining' : 'remaining'} color="cyan" title={provenance(main.usedPercent)} stale={stale} /><div className="allowance-info"><strong>{main.label}</strong><span>{main.windowMinutes ? `${duration(main.windowMinutes * 60000)} window` : 'Window not reported'}</span><span className={stale ? 'text-amber' : 'text-cyan'}>{stale ? 'Snapshot is stale' : reset !== null ? `Resets in ${duration(reset - now)}` : 'Reset not reported'}</span><small>Shared account allowance</small></div></div>
+      <div className="allowance-main"><Gauge percent={remaining} value={remaining === null ? '—' : `${Math.round(remaining)}%`} label={stale ? 'last known remaining' : 'remaining'} color="cyan" title={provenance(main.usedPercent)} stale={stale} unavailableLabel="Allowance unavailable" unavailableReason={main.usedPercent.provenance.reason || "The provider did not report a valid allowance percentage."} /><div className="allowance-info"><strong>{main.label}</strong><span>{main.windowMinutes ? `${duration(main.windowMinutes * 60000)} window` : 'Window not reported'}</span><span className={stale ? 'text-amber' : 'text-cyan'}>{stale ? 'Snapshot is stale' : reset !== null ? `Resets in ${duration(reset - now)}` : 'Reset not reported'}</span><small>Shared account allowance</small></div></div>
       <div className="allowance-windows">{allowances.map(a => { const resetAt = epochMilliseconds(a.resetsAt); const expired = a.usedPercent.provenance.quality === 'stale' || (resetAt !== null && resetAt <= now); return <div className="allowance-window" key={a.id} title={`${provenance(a.usedPercent)}\nBucket: ${a.id}`}><div><span>{a.label}</span><strong>{isKnown(a.usedPercent.value) ? `${Math.round(Math.max(0, 100 - a.usedPercent.value))}% left` : 'Unavailable'}</strong></div><div className="bar-track"><span className={expired ? 'muted-fill' : 'cyan'} style={{ width: isKnown(a.usedPercent.value) ? `${Math.max(0, Math.min(100, 100 - a.usedPercent.value))}%` : '0%' }} /></div><small>{expired ? `Stale · reset ${when(a.resetsAt)}` : a.resetsAt ? `Resets ${when(a.resetsAt)}` : 'Reset time not reported'}</small></div>; })}</div>
-    </> : <><div className="allowance-main"><Gauge percent={null} value="—" label="Unavailable" color="cyan" title="No supported account allowance source is available." /><div className="allowance-info"><strong>No allowance snapshot</strong><span>{session.provider === 'claude' ? 'Claude session discovery does not report subscription quota.' : 'No accessible, valid account snapshot has been reported.'}</span></div></div><p className="card-footnote">Monitoring continues without account allowance data.</p></>}
+    </> : <><div className="allowance-main"><Gauge percent={null} value="—" label="Unavailable" color="cyan" title="No supported account allowance source is available." unavailableLabel="Allowance unavailable" unavailableReason={session.provider === "claude" ? "Claude session discovery does not provide subscription allowance data." : "No supported account allowance snapshot is accessible."} /><div className="allowance-info"><strong>No allowance snapshot</strong><span>{session.provider === 'claude' ? 'Claude session discovery does not report subscription quota.' : 'No accessible, valid account snapshot has been reported.'}</span></div></div><p className="card-footnote">Monitoring continues without account allowance data.</p></>}
   </Card>;
 }
 function TrendChart({ session }: { session: Session }) {
@@ -198,30 +200,42 @@ function useMonitor() {
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [connection, setConnection] = useState<'connecting' | 'live' | 'reconnecting'>('connecting');
   const [failure, setFailure] = useState<string | null>(null);
-  const latest = useRef({ revision: -1, observedAt: 0 });
+  const latest = useRef({ revision: -1, observedAt: 0, instanceId: '' });
   useEffect(() => {
     let active = true;
     let refreshing: Promise<void> | null = null;
     let stream: EventSource | null = null;
     let streamAuthorization = browserAuthorizationRevision();
     let retryTimer: number | undefined;
+    let refreshController: AbortController | null = null;
+    const retiredInstances = new Set<string>();
+    let receivedSequence = 0;
+    let lastStreamAt = Date.now();
     const receive = (incoming: Snapshot) => {
       if (!active || !incoming || !Array.isArray(incoming.sessions) || typeof incoming.revision !== 'number') return;
       const observedAt = epochMilliseconds(incoming.observedAt) || 0;
-      if (observedAt < latest.current.observedAt || (observedAt === latest.current.observedAt && incoming.revision < latest.current.revision)) return;
-      latest.current = { revision: incoming.revision, observedAt };
+      const instanceId = incoming.instanceId || '';
+      if (retiredInstances.has(instanceId)) return;
+      if (instanceId === latest.current.instanceId) {
+        if (incoming.revision < latest.current.revision) return;
+      } else if (latest.current.instanceId) retiredInstances.add(latest.current.instanceId);
+      latest.current = { revision: incoming.revision, observedAt, instanceId };
       setSnapshot(incoming); setFailure(null);
     };
     const refresh = (): Promise<void> => {
       if (refreshing) return refreshing;
+      const controller = new AbortController(); refreshController = controller;
+      const sequenceAtStart = receivedSequence;
       refreshing = (async () => {
         try {
-          const response = await localFetch('/api/snapshot', { cache: 'no-store' });
+          const response = await localFetch('/api/snapshot', { cache: 'no-store', signal: controller.signal });
           if (!response.ok) throw new Error(`Dashboard snapshot returned ${response.status}`);
-          receive(await response.json() as Snapshot);
+          const incoming = await response.json() as Snapshot;
+          // A stream may have crossed a restart while this request was pending.
+          if (receivedSequence === sequenceAtStart || incoming.instanceId === latest.current.instanceId) receive(incoming);
           if (active && stream && streamAuthorization !== browserAuthorizationRevision()) connectStream();
         } catch (error) { if (active) setFailure(error instanceof Error ? error.message : 'The local dashboard is unavailable.'); }
-        finally { refreshing = null; }
+        finally { refreshing = null; if (refreshController === controller) refreshController = null; }
       })();
       return refreshing;
     };
@@ -232,12 +246,14 @@ function useMonitor() {
       streamAuthorization = browserAuthorizationRevision();
       const current = new EventSource('/api/events');
       stream = current;
+      lastStreamAt = Date.now();
       current.addEventListener('open', () => { if (active && current === stream) { setConnection('live'); void refresh(); } });
       current.addEventListener('snapshot', event => {
         if (!active || current !== stream) return;
-        try { receive(JSON.parse((event as MessageEvent<string>).data) as Snapshot); setConnection('live'); }
+        try { receivedSequence++; lastStreamAt = Date.now(); receive(JSON.parse((event as MessageEvent<string>).data) as Snapshot); setConnection('live'); }
         catch { void refresh(); }
       });
+      current.addEventListener('heartbeat', () => { if (active && current === stream) lastStreamAt = Date.now(); });
       current.addEventListener('resync', () => { if (current === stream) void refresh(); });
       current.addEventListener('error', () => {
         if (!active || current !== stream) return;
@@ -251,35 +267,31 @@ function useMonitor() {
     void refresh(); connectStream();
     const onVisibility = () => { if (document.visibilityState === 'visible') void refresh(); };
     document.addEventListener('visibilitychange', onVisibility);
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 30000);
-    return () => { active = false; stream?.close(); window.clearTimeout(retryTimer); window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisibility); };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - lastStreamAt > 45000) { setConnection('reconnecting'); connectStream(); }
+      void refresh();
+    }, 30000);
+    return () => { active = false; refreshController?.abort(); stream?.close(); window.clearTimeout(retryTimer); window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisibility); };
   }, []);
   const updateObserver = (observer: ObserverSnapshot) => setSnapshot(value => ({ ...value, observer }));
   return { snapshot, connection, failure, updateObserver };
 }
-function DiagnosticsPanel({ snapshot, session, onClose }: { snapshot: Snapshot; session: Session | undefined; onClose: () => void }) {
-  const { when, provenance } = useTimes();
-  const rows: Diagnostic[] = [...snapshot.diagnostics, ...(session?.diagnostics ?? [])];
-  return <aside className="diagnostics-panel" aria-label="Source diagnostics"><div className="panel-heading"><div><h2>Source diagnostics</h2><p>Read-only observation and source coverage</p></div><button className="icon-button" aria-label="Close source diagnostics" onClick={onClose}><Icon name="close" /></button></div><div className="diagnostic-meta"><span>Snapshot revision <b>{snapshot.revision}</b></span><span>Observed <b>{when(snapshot.observedAt)}</b></span><span>Collector <b>{snapshot.collecting ? 'Reconciling' : 'Observing'}</b></span></div>{rows.length ? <ul className="diagnostic-list">{rows.map((d, i) => <li key={`${d.code}-${i}`} className={`diagnostic-${d.level}`}><Icon name="info" size={16} /><div><strong>{d.provider ? `${providerNames[d.provider]} · ` : ''}{d.code.replaceAll('_', ' ')}</strong><p>{d.message}</p>{d.namespace && <small className="mono wrap-text">{d.namespace}</small>}</div></li>)}</ul> : <p className="diagnostic-none">No source issues reported in this snapshot.</p>}{session && <details className="metric-sources"><summary>Metric provenance</summary>{[['State', session.state], ['Session tokens', session.usage], ['Current turn', session.turnUsage], ['Context occupancy', session.context.used], ['Context capacity', session.context.capacity], ['Effort', session.effort], ['Edits', session.edits], ['ETA', session.timing.eta]].map(([label, value]) => <div key={String(label)}><strong>{String(label)}</strong><p>{provenance(value as Metric<unknown>)}</p></div>)}</details>}</aside>;
-}
-function HistoryPanel({ sessions, selectedId, select, onClose, now }: { sessions: Session[]; selectedId: string | null; select: (id: string) => void; onClose: () => void; now: number }) {
-  const [query, setQuery] = useState('');
-  const [provider, setProvider] = useState<'all' | 'codex' | 'claude'>('all');
-  const [showHistory, setShowHistory] = useState(false);
-  const filtered = sessions.filter(s => !s.parentId && (showHistory || hasRecentActiveEvidence(s, now)) && (provider === 'all' || s.provider === provider) && `${s.name} ${s.nativeId} ${s.cwd} ${s.model.value}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => Number(b.runtime.reachable) - Number(a.runtime.reachable) || compareTimestampsNewestFirst(a.lastActivityAt, b.lastActivityAt));
-  return <aside className="history-panel" aria-label="Session history"><div className="panel-heading"><div><h2>Session history</h2><p>{sessions.filter(s => !s.parentId).length} conversations discovered automatically</p></div><button className="icon-button" aria-label="Close session history" onClick={onClose}><Icon name="close" /></button></div><div className="history-controls"><label className="search-field"><Icon name="search" size={17} /><input autoFocus type="search" placeholder="Search name, project, or ID" value={query} onChange={e => setQuery(e.target.value)} aria-label="Search session history" /></label><select value={provider} onChange={e => setProvider(e.target.value as typeof provider)} aria-label="Filter session provider"><option value="all">All providers</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select></div><label className="history-toggle"><input type="checkbox" checked={showHistory} onChange={event => setShowHistory(event.target.checked)} />Show historical and archived sessions</label><div className="history-list">{filtered.length ? filtered.map(s => <button key={s.id} className={`history-item${s.id === selectedId ? ' selected' : ''}`} onClick={() => { select(s.id); onClose(); }}><span className={`provider-mark ${s.provider}`}><Icon name={s.provider} /></span><span className="history-item-content"><strong>{s.name}</strong><span>{s.project ?? s.cwd ?? s.nativeId}</span><small>{providerNames[s.provider]} · {relative(s.lastActivityAt, now)}{s.archived ? ' · archived' : ''}</small></span><Status session={s} small /></button>) : <Empty compact icon="search" title={showHistory || query ? "No matching sessions" : "No active conversations"} detail={showHistory || query ? "Try a different name, path, or provider." : "Historical sessions are hidden. Enable the checkbox above to browse them."} />}</div></aside>;
+function HistoryPanel({ sessions, filters, onFilters, selectedId, select, onClose, now }: { sessions: Session[]; filters: SessionFilters; onFilters: (value: SessionFilters) => void; selectedId: string | null; select: (id: string) => void; onClose: () => void; now: number }) {
+  return <aside className="history-panel" aria-label="Session history"><div className="panel-heading"><div><h2>Session history</h2><p>{sessions.length} matching conversation{sessions.length === 1 ? '' : 's'}</p></div><button className="icon-button" aria-label="Close session history" onClick={onClose}><Icon name="close" /></button></div><div className="history-controls"><label className="search-field"><Icon name="search" size={17} /><input autoFocus type="search" placeholder="Search name, project, or ID" value={filters.query} onChange={event => onFilters({ ...filters, query: event.target.value })} aria-label="Search session history" /></label><select value={filters.provider} onChange={event => onFilters({ ...filters, provider: event.target.value as SessionFilters['provider'] })} aria-label="Filter session provider"><option value="all">All providers</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select></div><label className="history-toggle"><input type="checkbox" checked={filters.showHistory} onChange={event => onFilters({ ...filters, showHistory: event.target.checked })} />Show historical and archived sessions</label><div className="history-list">{sessions.length ? sessions.map(session => <button key={session.id} className={`history-item${session.id === selectedId ? ' selected' : ''}`} onClick={() => { select(session.id); onClose(); }}><span className={`provider-mark ${session.provider}`}><Icon name={session.provider} /></span><span className="history-item-content"><strong>{session.name}</strong><span>{session.project ?? session.cwd ?? session.nativeId}</span><small>{providerNames[session.provider]} · {relative(reportedActivityAt(session), now)}{session.archived ? ' · archived' : ''}</small></span><Status session={session} small now={now} /></button>) : <Empty compact icon="search" title={filters.showHistory || filters.query ? 'No matching sessions' : 'No open or confirmed sessions'} detail={filters.showHistory || filters.query ? 'Try a different name, path, or provider.' : 'Historical sessions are hidden. Enable the checkbox above to browse them.'} />}</div></aside>;
 }
 export default function App() {
   const { snapshot, connection, failure, updateObserver } = useMonitor();
   const [selectedId, setSelectedId] = useState<string | null>(readSelection);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [sessionFilters, setSessionFilters] = useState<SessionFilters>({ query: '', provider: 'all', showHistory: false });
   const [now, setNow] = useState(Date.now());
   const [tabLimit, setTabLimit] = useState(12);
   const [selectionError, setSelectionError] = useState<string | null>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const mainSessions = useMemo(() => snapshot.sessions.filter(s => !s.parentId), [snapshot.sessions]);
   const selected = snapshot.sessions.find(s => s.id === selectedId);
+  const listedSessions = useMemo(() => filteredSessionCollection(mainSessions, sessionFilters, now), [mainSessions, sessionFilters, now]);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   useEffect(() => {
     const fitTabs = () => setTabLimit(Math.max(6, Math.min(18, Math.floor(Math.max(180, window.innerWidth - 60) / 180) * 2)));
@@ -300,25 +312,23 @@ export default function App() {
     void observerRequest('selection', { sessionId: selectedId }).then(value => { if (active) updateObserver(value); }).catch(error => { if (active) setSelectionError(error instanceof Error ? error.message : 'Observer selection failed.'); });
     return () => { active = false; };
     // Selection follows identity, never a stream update or native rename.
-  }, [selectedId, observerReady]);
-  useEffect(() => { const key = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') { setHistoryOpen(false); setDiagnosticsOpen(false); } }; document.addEventListener('keydown', key); return () => document.removeEventListener('keydown', key); }, []);
+  }, [selectedId, observerReady, snapshot.instanceId]);
+  useEffect(() => { const key = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') { setHistoryOpen(false); } }; document.addEventListener('keydown', key); return () => document.removeEventListener('keydown', key); }, []);
   const tabs = limitSessionTabs(sessionTabs(mainSessions, selectedId, now), selectedId, tabLimit);
   const children = selected ? snapshot.sessions.filter(s => s.parentId === selected.id || (s.parentId === selected.nativeId && s.namespace === selected.namespace && s.provider === selected.provider)) : [];
   const allowances = selected ? snapshot.allowances.filter(a => selected.allowanceIds.includes(a.id)) : [];
-  const liveCount = mainSessions.filter(s => runtimePresentation(s, now, snapshot.diagnostics).verified).length;
-  const warnings = snapshot.diagnostics.filter(d => d.level !== 'info').length + (selected?.diagnostics.filter(d => d.level !== 'info').length ?? 0);
+  const liveCount = listedSessions.filter(session => sessionEligibility(session, now).runtimeConfirmed).length;
   const onTabKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const next = nextTabIndex(event.key, index, tabs.length);
     if (next !== null) { event.preventDefault(); setSelectedId(tabs[next].id); tabRefs.current.get(tabs[next].id)?.focus(); }
   };
-  return <DisplayZone.Provider value={snapshot.observer?.settings.timezone ?? null}><div className="app-shell"><a className="skip-link" href="#session-dashboard">Skip to dashboard</a><div className="topbar"><a href="/" className="brand" aria-label="Agent Monitor home"><span className="brand-symbol"><Icon name="pulse" size={22} /></span><span>Agent Monitor</span><span className="local-label">Local</span></a><div className="topbar-actions"><span className={`connection ${connection}`} role="status"><span className="status-dot" />{connection === 'live' ? 'Stream connected' : connection === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><button className={`text-button${historyOpen ? ' active' : ''}`} onClick={() => { setHistoryOpen(v => !v); setDiagnosticsOpen(false); }} aria-expanded={historyOpen}><Icon name="history" size={17} /><span>History</span><span className="button-count">{mainSessions.length}</span></button><button className={`text-button diagnostics-button${diagnosticsOpen ? ' active' : ''}`} onClick={() => { setDiagnosticsOpen(v => !v); setHistoryOpen(false); }} aria-expanded={diagnosticsOpen}><Icon name="info" size={17} /><span>Sources</span>{warnings > 0 && <span className="warning-count">{warnings}</span>}</button></div></div>
+  return <DisplayZone.Provider value={snapshot.observer?.settings.timezone ?? null}><div className="app-shell"><a className="skip-link" href="#session-dashboard">Skip to dashboard</a><div className="topbar"><a href="/" className="brand" aria-label="Agent Monitor home"><span className="brand-symbol"><Icon name="pulse" size={22} /></span><span>Agent Monitor</span><span className="local-label">Local</span></a><div className="topbar-actions"><span className={`connection ${connection}`} role="status"><span className="status-dot" />{connection === 'live' ? 'Stream connected' : connection === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><button className={`text-button${historyOpen ? ' active' : ''}`} onClick={() => { setHistoryOpen(v => !v); }} aria-expanded={historyOpen}><Icon name="history" size={17} /><span>History</span><span className="button-count">{listedSessions.length}</span></button></div></div>
     {failure && <div className="connection-banner" role="alert"><Icon name="info" />{failure}. Showing the last available snapshot while reconnecting.</div>}
     {connection === 'reconnecting' && !failure && <div className="connection-banner" role="status"><Icon name="info" />Reconnecting to the local observer. Your selection and last snapshot are preserved.</div>}
     {selected ? <header className="session-header"><div className={`session-avatar ${selected.provider}`}><Icon name={selected.provider} size={28} /></div><div className="session-heading"><div className="session-heading-top"><span>{providerNames[selected.provider]}</span><span className="separator">/</span><span>{selected.model.value ?? 'Model not reported'}</span>{selected.effort.value && <span className="effort-label">{selected.effort.value}</span>}</div><h1 title={selected.name}>{selected.name}</h1><p><Icon name="folder" size={14} /><span title={selected.cwd ?? undefined}>{selected.project ?? selected.cwd ?? 'Working directory not reported'}</span><span className="header-native-id" title={selected.nativeId}>{selected.nativeId.slice(0, 8)}</span></p></div><div className="header-status"><Status session={selected} now={now} diagnostics={snapshot.diagnostics} /><span><Icon name="clock" size={14} />{duration(selected.timing.elapsedMs.value)} elapsed</span></div></header> : <header className="waiting-header"><h1>Your agents, in view.</h1><p>Existing Codex and Claude Code sessions appear automatically as local sources are discovered.</p></header>}
-    {tabs.length > 0 && <nav className="sessions-nav" aria-label="Session navigation"><div className="sessions-tabs" role="tablist" aria-label="Sessions">{tabs.map((s, i) => <button key={s.id} id={`tab-${encodeURIComponent(s.id)}`} role="tab" aria-selected={s.id === selectedId} aria-controls="session-dashboard" tabIndex={s.id === selectedId ? 0 : -1} ref={element => { if (element) tabRefs.current.set(s.id, element); else tabRefs.current.delete(s.id); }} onKeyDown={event => onTabKey(event, i)} onClick={() => setSelectedId(s.id)} className={`session-tab ${s.provider}${s.id === selectedId ? ' selected' : ''}`} title={`${s.name}\n${providerNames[s.provider]} · ${runtimePresentation(s, now, snapshot.diagnostics).label}\n${s.nativeId}`}><Icon name={s.provider} size={16} /><span>{s.name}</span><span className={`tab-state state-${runtimePresentation(s, now, snapshot.diagnostics).tone}`} /></button>)}</div>{mainSessions.length > tabs.length && <button className="all-sessions" onClick={() => { setHistoryOpen(true); setDiagnosticsOpen(false); }} aria-label={`Browse all ${mainSessions.length} sessions`}>All sessions ({mainSessions.length})<Icon name="chevron" size={13} /></button>}</nav>}
-    <div className="session-counts"><span><span className="status-dot green" />{liveCount} runtime{liveCount === 1 ? '' : 's'} confirmed<span className="counts-divider">·</span>{mainSessions.length - liveCount} with unconfirmed runtime</span><span>{snapshot.collecting ? 'Discovering local sources…' : 'Observing local sources'}<span className="counts-divider">·</span>{snapshot.observedAt ? `Collector snapshot ${relative(snapshot.observedAt, now).toLowerCase()}` : 'First snapshot pending'}</span></div>
-    {historyOpen && <HistoryPanel sessions={snapshot.sessions} selectedId={selectedId} select={setSelectedId} onClose={() => setHistoryOpen(false)} now={now} />}
-    {diagnosticsOpen && <DiagnosticsPanel snapshot={snapshot} session={selected} onClose={() => setDiagnosticsOpen(false)} />}
-    <main id="session-dashboard" role={selected ? 'tabpanel' : undefined} aria-labelledby={selected ? `tab-${encodeURIComponent(selected.id)}` : undefined} tabIndex={-1}>{selected ? <><div className="dashboard-grid"><ContextCard session={selected} /><TokensCard session={selected} /><AllowanceCard session={selected} allowances={allowances} now={now} /><ToolsCard session={selected} /><Card title="Token activity" icon="wave" className="activity-card" hint="Observed input and output token snapshots from the source. These observations do not indicate task progress."><TrendChart session={selected} /><div className="activity-stats"><div><strong>{fmt(selected.timing.completedTurns)}</strong><span>completed turns</span></div><div><strong>{duration(selected.timing.lastTurnMs.value)}</strong><span>last turn</span></div><div><strong>{relative(selected.lastActivityAt, now)}</strong><span>last activity</span></div></div></Card><TimingCard session={selected} now={now} observer={snapshot.observer} onObserver={updateObserver} selectionError={selectionError} /><MetadataCard session={selected} now={now} /><SubagentsCard session={selected} children={children} now={now} diagnostics={snapshot.diagnostics} /><AttributionCard session={selected} /><RecentActivity session={selected} now={now} /></div><SessionSummary session={selected} now={now} diagnostics={snapshot.diagnostics} /></> : <div className="waiting-dashboard"><div className="waiting-orbit"><Icon name="pulse" size={46} /></div><h2>{snapshot.collecting ? 'Discovering your sessions' : 'Waiting for your agents'}</h2><p>Launch Codex or Claude Code normally. Sessions already on this computer and sessions you start later appear here automatically.</p><div className="waiting-providers"><span><Icon name="codex" />Codex</span><span><Icon name="claude" />Claude Code</span></div><button className="text-button" onClick={() => setDiagnosticsOpen(true)}><Icon name="info" />View source diagnostics</button></div>}</main><footer><span><Icon name="shield" size={14} />Local session collection</span><span>Agent Monitor<span className="counts-divider">·</span>AI assessment {snapshot.observer?.settings.enabled ? "on" : "off"}</span></footer>
+    {tabs.length > 0 && <nav className="sessions-nav" aria-label="Session navigation"><div className="sessions-tabs" role="tablist" aria-label="Sessions">{tabs.map((s, i) => <button key={s.id} id={`tab-${encodeURIComponent(s.id)}`} role="tab" aria-selected={s.id === selectedId} aria-controls="session-dashboard" tabIndex={s.id === selectedId ? 0 : -1} ref={element => { if (element) tabRefs.current.set(s.id, element); else tabRefs.current.delete(s.id); }} onKeyDown={event => onTabKey(event, i)} onClick={() => setSelectedId(s.id)} className={`session-tab ${s.provider}${s.id === selectedId ? ' selected' : ''}`} title={`${s.name}\n${providerNames[s.provider]} · ${runtimePresentation(s, now, snapshot.diagnostics).label}\n${s.nativeId}`}><Icon name={s.provider} size={16} /><span>{s.name}</span><span className={`tab-state state-${runtimePresentation(s, now, snapshot.diagnostics).tone}`} /></button>)}</div>{mainSessions.length > tabs.length && <button className="all-sessions" onClick={() => { setHistoryOpen(true); }} aria-label={`Browse ${listedSessions.length} matching sessions`}>All sessions ({listedSessions.length})<Icon name="chevron" size={13} /></button>}</nav>}
+    <div className="session-counts"><span><span className="status-dot green" />{liveCount} runtime{liveCount === 1 ? '' : 's'} confirmed<span className="counts-divider">·</span>{listedSessions.length - liveCount} with unconfirmed runtime</span><span>{snapshot.collector?.state === 'failed' ? 'Collection failed; retrying' : snapshot.collecting ? 'Discovering local sources…' : snapshot.collector?.state === 'degraded' ? 'Some sources unavailable' : 'Observing local sources'}<span className="counts-divider">·</span>{snapshot.observedAt ? `${snapshot.collector?.cached ? 'Cached snapshot' : 'Collector snapshot'} ${relative(snapshot.observedAt, now).toLowerCase()}` : 'First snapshot pending'}</span></div>
+    {historyOpen && <HistoryPanel sessions={listedSessions} filters={sessionFilters} onFilters={setSessionFilters} selectedId={selectedId} select={setSelectedId} onClose={() => setHistoryOpen(false)} now={now} />}
+    <main id="session-dashboard" role={selected ? 'tabpanel' : undefined} aria-labelledby={selected ? `tab-${encodeURIComponent(selected.id)}` : undefined} tabIndex={-1}>{selected ? <><div className="dashboard-grid"><ContextCard session={selected} /><TokensCard session={selected} /><AllowanceCard session={selected} allowances={allowances} now={now} /><ToolsCard session={selected} /><Card title="Token activity" icon="wave" className="activity-card" hint="Observed input and output token snapshots from the source. These observations do not indicate task progress."><TrendChart session={selected} /><div className="activity-stats"><div><strong>{fmt(selected.timing.completedTurns)}</strong><span>completed turns</span></div><div><strong>{duration(selected.timing.lastTurnMs.value)}</strong><span>last turn</span></div><div><strong>{relative(selected.lastActivityAt, now)}</strong><span>last activity</span></div></div></Card><TimingCard session={selected} now={now} observer={snapshot.observer} onObserver={updateObserver} selectionError={selectionError} /><MetadataCard session={selected} now={now} /><SubagentsCard session={selected} children={children} now={now} diagnostics={snapshot.diagnostics} /><AttributionCard session={selected} /><RecentActivity session={selected} now={now} /></div><SessionSummary session={selected} now={now} diagnostics={snapshot.diagnostics} /></> : <div className="waiting-dashboard"><div className="waiting-orbit"><Icon name="pulse" size={46} /></div><h2>{snapshot.collecting ? 'Discovering your sessions' : 'Waiting for your agents'}</h2><p>Launch Codex or Claude Code normally. Sessions already on this computer and sessions you start later appear here automatically.</p><div className="waiting-providers"><span><Icon name="codex" />Codex</span><span><Icon name="claude" />Claude Code</span></div></div>}</main><footer><span><Icon name="shield" size={14} />Local session collection</span><span>Agent Monitor<span className="counts-divider">·</span>AI assessment {snapshot.observer?.settings.enabled ? "on" : "off"}</span></footer>
   </div></DisplayZone.Provider>;
 }

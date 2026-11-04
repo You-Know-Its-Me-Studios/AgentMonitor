@@ -19,7 +19,7 @@ export interface Session {
   cwd: string | null; project: string | null; branch: string | null;
   startedAt: string | null; lastActivityAt: string | null;
   parentId: string | null; forkedFromId: string | null; archived: boolean;
-  runtime: { reachable: boolean; loaded: boolean; attachment: 'known' | 'unknown'; pid: number | null; processStartedAt: string | null; observedAt: string | null };
+  runtime: { reachable: boolean; loaded: boolean; serverReachable?: boolean; openTurn?: boolean; attachment: 'known' | 'unknown'; pid: number | null; processStartedAt: string | null; observedAt: string | null };
   state: Metric<'running' | 'idle' | 'approval' | 'input' | 'complete' | 'historical' | 'unknown'>;
   latestActivity: string; usage: Metric<Usage>; turnUsage: Metric<Usage>;
   context: { used: Metric<number>; capacity: Metric<number> };
@@ -35,7 +35,12 @@ export interface Session {
   agentRole?: 'implementation' | 'approval-reviewer' | 'unknown';
   diagnostics: Diagnostic[];
 }
-export interface Snapshot { revision: number; observedAt: string; sessions: Session[]; allowances: Allowance[]; diagnostics: Diagnostic[]; collecting: boolean; observer?: ObserverSnapshot; build?: { id: string; builtAt: string } }
+export interface CollectorStatus {
+  state: 'initializing' | 'ready' | 'degraded' | 'failed' | 'stopped';
+  lastStartedAt: string | null; lastCompletedAt: string | null; lastError: string | null;
+  cached: boolean;
+}
+export interface Snapshot { revision: number; observedAt: string; sessions: Session[]; allowances: Allowance[]; diagnostics: Diagnostic[]; collecting: boolean; observer?: ObserverSnapshot; build?: { id: string; builtAt: string }; instanceId?: string; collector?: CollectorStatus }
 export function metric<T>(value: T | null, source: string, scope: string, quality: Quality = value === null ? 'unavailable' : 'reported', reason?: string, observedAt = new Date().toISOString()): Metric<T> {
   return { value, provenance: { source, scope, quality, reason, observedAt } };
 }

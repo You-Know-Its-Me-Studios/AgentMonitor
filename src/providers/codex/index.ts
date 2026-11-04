@@ -6,7 +6,9 @@ import { readMetadata, type ThreadMetadata } from './sqlite.js';
 import { canonicalHeader, mergeCodexObservations, readCodexTail } from './tail.js';
 import { isObserverWorkspace } from '../../server/task-evidence.js';
 
-const UUID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
+const UUID_PART='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const UUID = new RegExp(`(${UUID_PART})(?:_${UUID_PART})?\\.jsonl$`,'i');
+function filenameThreadId(path:string):string|null{return path.match(UUID)?.[1]??null;}
 export function parseDaemonProbe(stdout: string): { version: string; socket: string | null } {
   const value = JSON.parse(stdout);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid daemon probe');
@@ -22,6 +24,11 @@ async function discover(context: AdapterContext, directory: string): Promise<Fil
   return files;
 }
 function diagnostic(context: AdapterContext, code: string, message: string, level: Diagnostic['level'] = 'info'): Diagnostic { return { provider: 'codex', namespace: context.namespace, level, code, message, at: context.now }; }
+async function loadedThreads(proxy:ObserverProxy):Promise<{ids:Map<string,number>;complete:boolean}> {
+  const ids=new Map<string,number>(),cursors=new Set<string>();let cursor:string|undefined;
+  try{do{const result=await proxy.request('thread/loaded/list',cursor?{cursor}:undefined);if(!Array.isArray(result?.data))throw new Error('Unsupported loaded-thread response');for(const id of result.data)if(typeof id==='string'&&id.length>0)ids.set(id,result.__observerSequence??0);const next=result.nextCursor??result.next_cursor;if(next===null||next===undefined||next==='')return{ids,complete:true};if(typeof next!=='string'||cursors.has(next))throw new Error('Invalid loaded-thread cursor');cursors.add(next);cursor=next;}while(cursor);}catch{if(!ids.size)throw new Error('Loaded-thread discovery is unavailable');}
+  return{ids,complete:false};
+}
 function applyMetadata(session: Session, row: ThreadMetadata): void {
   if (row.name || row.title) { session.name = row.name ?? row.title!; session.nameSource = row.name ? 'native session name' : 'native generated title'; }
   // Database recency includes renames/settings and is not a substitute for an ingested event time.
@@ -34,13 +41,16 @@ function applyMetadata(session: Session, row: ThreadMetadata): void {
 }
 export function applyRuntime(session: Session, thread: any, context: AdapterContext, loaded: boolean): void {
   const status = thread.status; const type = typeof status === 'string' ? status : status?.type; const flags: string[] = Array.isArray(status?.activeFlags) ? status.activeFlags.filter((flag:unknown)=>typeof flag==='string') : [];
-  session.runtime = { reachable: true, loaded: type !== 'notLoaded'&&(loaded||['active','idle','systemError'].includes(type)), attachment: 'unknown', pid: null, processStartedAt: null, observedAt: context.now };
+  const threadLoaded=type!=='notLoaded'&&(loaded||['active','idle','systemError'].includes(type));
+  const previousOpen=session.runtime.openTurn;
+  const currentStatus=!thread.__staleStatus&&!thread.__readFailed;
+  session.runtime = { reachable: threadLoaded, loaded: threadLoaded, serverReachable:true, openTurn:currentStatus&&type==='active'?true:currentStatus&&type==='idle'?false:previousOpen, attachment: 'unknown', pid: null, processStartedAt: null, observedAt: context.now };
   let state: Session['state']['value'] = 'unknown';
   const malformedFlags=status?.activeFlags!==undefined&&(!Array.isArray(status.activeFlags)||status.activeFlags.some((flag:unknown)=>typeof flag!=='string'));
   if (type === 'active'&&!malformedFlags) state = flags.some(f => /approval/i.test(f)) ? 'approval' : flags.some(f => /input/i.test(f)) ? 'input' : flags.some(f=>/waiting/i.test(f))?'unknown':'running';
   else if (type === 'idle') state = 'idle'; else if (type === 'notLoaded') state = 'historical';
-  const reason=state==='approval'?'Existing app-server reports a loaded thread waiting for approval.':state==='input'?'Existing app-server reports a loaded thread waiting for user input.':state==='running'?'Existing app-server reports an active loaded thread.':state==='idle'?'Existing app-server reports an idle loaded thread; idle does not mean the process exited.':state==='historical'?'Existing app-server reports this thread is not loaded; terminal attachment is unknown.':type==='systemError'?'Existing app-server reports a system error; current task state is unknown.':malformedFlags?'Existing app-server returned unsupported active flags; the task state cannot be interpreted.':'Existing app-server returned an unsupported runtime state or waiting condition.';
-  session.state = metric(state,'Existing Codex app-server observer','runtime',state === 'unknown' ? 'unavailable' : 'reported',reason,context.now);
+  const reason=state==='approval'?'Existing app-server reports a loaded thread waiting for approval.':state==='input'?'Existing app-server reports a loaded thread waiting for user input.':state==='running'?'Existing app-server reports an active loaded thread.':state==='idle'?'Existing app-server reports an idle loaded thread; idle does not mean the process exited.':state==='historical'?'Existing app-server explicitly reports this thread is not loaded; persisted turn state and terminal attachment are separate.':thread.__readFailed?'Loaded-thread discovery confirms this thread is in memory, but its metadata/status read failed; the last known turn state is retained.':type==='systemError'?'Existing app-server reports a system error; current task state is unknown.':malformedFlags?'Existing app-server returned unsupported active flags; the task state cannot be interpreted.':'Existing app-server returned an unsupported runtime state or waiting condition.';
+  session.state = metric(state,'Existing Codex app-server observer','runtime',state === 'unknown' ? 'unavailable' : thread.__staleStatus?'stale':'reported',thread.__staleStatus?`${reason} This is the last readable status; loaded membership was just reconciled and metadata refresh is queued.`:reason,thread.__readAt??context.now);
   if (string(thread.name)) { session.name = thread.name; session.nameSource = 'native live name'; }
   if (string(thread.model)) session.model = metric(thread.model,'Existing Codex app-server','session','reported',undefined,context.now);
   if (string(thread.reasoningEffort)) session.effort = metric(thread.reasoningEffort,'Existing Codex app-server','session','reported',undefined,context.now);
@@ -55,17 +65,18 @@ export function daemonFailureReason(stderr:string):string {
 }
 export function applyPersistedRuntimeReason(session:Session,state:CodexState|undefined,context:AdapterContext,failure:string,probeAt:string):void {
   if(session.runtime.reachable)return;
-  const recent=!!session.lastActivityAt&&Date.parse(context.now)-Date.parse(session.lastActivityAt)<15*60000;
+  if(session.runtime.openTurn===undefined&&state?.lastTask)session.runtime.openTurn=state.lastTask==='started';
   const taskEvidence=state?.lastTask==='started'?'Native records show a started turn with no recorded completion.':state?.lastTask==='aborted'?'Native records show an interrupted turn.':state?.lastTask==='complete'?'Native records show the last turn completed; process liveness is unconfirmed.':session.task?.state==='paused'?'The latest public task instructions pause work.':'No current native runtime status has been verified.';
   const reason=`${failure} ${taskEvidence} A daemon process or writer-lock file does not establish this thread is running.`;
-  session.state=metric(recent||!session.lastActivityAt?'unknown':'historical','Codex persisted observation','runtime',recent?'derived':session.lastActivityAt?'derived':'unavailable',reason,probeAt);
+  // Quiet file-only conversations do not become historical after an elapsed-time cutoff.
+  if(session.state.provenance.source!=='Existing Codex app-server observer')session.state=metric(session.archived?'historical':'unknown','Codex persisted observation','runtime',state?.lastTask?'derived':'unavailable',reason,probeAt);
   if(session.collection)session.collection.reason=`${session.collection.reason}. ${failure}`;
   else session.collection={lastCheckedAt:context.now,ingestedAt:null,evidenceAt:session.lastActivityAt,condition:'unavailable',reason:`Conversation metadata is known; normalized source records have not been recovered. ${failure}`};
 }
 
 export function createCodexAdapter(): ProviderAdapter {
   const normalized = new Map<string,Session>(); const states = new Map<string,CodexState>(); const proxy = new ObserverProxy();
-  let lastScan = 0, lastProbe = 0, lastRuntime = 0, lastAllowance = 0, rotation = 0;
+  let lastScan = 0, lastProbe = 0, lastRuntime = 0, lastAllowance = 0, rotation = 0, runtimeRotation = 0;
   let files: FileInfo[] = [], proxyReady = false, runtimeFailure = 'Existing daemon has not been probed';
   let liveThreads = new Map<string,any>(), liveAllowances: Allowance[] = [];
   let metadata: ThreadMetadata[] = []; let metadataAvailable = false;
@@ -73,6 +84,9 @@ export function createCodexAdapter(): ProviderAdapter {
   let namespace = '';
   const tailCache=new Map<string,{identity:string;size:number;mtimeMs:number;generation:number;state:CodexState}>();
   const headers=new Map<string,{identity:string;record:any}>();
+  const sourceInfo=new Map<string,FileInfo>();
+  const selectedSources=new Map<string,string>();
+  const turnStates=new Map<string,{open:boolean;persisted:string}>();
   let observerIds=new Set<string>();
   return {
     provider: 'codex',
@@ -88,21 +102,25 @@ export function createCodexAdapter(): ProviderAdapter {
             const probe = parseDaemonProbe(result.stdout);
             await proxy.connect(context,probe.socket ?? undefined); proxyReady = true; runtimeFailure = '';
           }
-        } catch { proxyReady = false; runtimeFailure = 'Existing Codex daemon observation is unavailable or returned an unsupported response. Persisted observation is active.'; proxy.close(); }
+        } catch { proxyReady = false; runtimeFailure = proxy.error??'Existing Codex daemon observation is unavailable or returned an unsupported response. Persisted observation is active.'; proxy.close(); }
       }
       if(proxyReady&&!proxy.connected){proxyReady=false;liveThreads.clear();runtimeFailure='The existing Codex observer transport disconnected; current live thread status is unavailable.';}
       // Observe before enumeration, then reconcile loaded IDs again to close startup races.
       if (proxyReady && (!lastRuntime || now-lastRuntime >= 3000)) {
         lastRuntime = now;
-        // Old notifications must not override a newer authoritative reconciliation read.
-        proxy.notifications.clear();
+        // Sequence numbers keep older notifications behind authoritative reads;
+        // retain unread notifications if a queued metadata read fails.
         try {
-          const first = await proxy.request('thread/loaded/list'); const ids = Array.isArray(first?.data) ? first.data.filter((x: unknown) => typeof x === 'string') as string[] : [];
+          const first = await loadedThreads(proxy);
           const next = new Map<string,any>();
-          // State-db-only listing is optional. Never fall back to a repair scan.
-          try { const list = await proxy.request('thread/list',{limit:100,useStateDbOnly:true,sortKey:'updated_at'}); if (Array.isArray(list?.data)) for (const thread of list.data) if (typeof thread?.id === 'string') next.set(thread.id,{...thread,__observerSequence:list.__observerSequence}); } catch { diagnostics.push(diagnostic(context,'codex-state-list-unsupported','State-database-only runtime listing is unsupported; native files supply history.')); }
-          const second = await proxy.request('thread/loaded/list'); if (Array.isArray(second?.data)) for (const id of second.data) if (typeof id === 'string' && !ids.includes(id)) ids.push(id);
-          for (let offset = 0; offset < Math.min(ids.length,512); offset += 8) await Promise.all(ids.slice(offset,offset+8).map(async id => { try { const read = await proxy.request('thread/read',{threadId:id,includeTurns:false}); if (read?.thread?.id === id) next.set(id,{...read.thread,__loaded:true,__observerSequence:read.__observerSequence}); } catch { diagnostics.push(diagnostic(context,'codex-thread-read-unavailable','A loaded thread could not be read; it will be reconciled again.')); } }));
+          // Only loaded/list establishes membership. Historical thread/list rows never do.
+          const second = await loadedThreads(proxy);const listed=second.complete?second.ids:new Map([...first.ids,...second.ids]);
+          if(!first.complete||!second.complete){diagnostics.push(diagnostic(context,'codex-loaded-pagination-partial','Loaded-thread pagination was interrupted; discovered IDs and previously loaded placeholders are retained.','warning'));if(!second.complete)for(const[id,thread]of liveThreads)if(!listed.has(id))listed.set(id,thread.__observerSequence??0);}
+          const ids=[...listed.keys()];for(const[id,sequence]of listed){const previous=liveThreads.get(id);next.set(id,previous?{...previous,__loaded:true,__membershipSequence:sequence,__staleStatus:true}:{id,__loaded:true,__readFailed:true,__membershipSequence:sequence,__observerSequence:-1});}
+          // Membership is complete even when metadata is slow. Rotate bounded reads
+          // independently so one quiet or unreadable thread cannot delay all tabs.
+          const readIds=ids.length?Array.from({length:Math.min(8,ids.length)},(_,index)=>ids[(runtimeRotation+index)%ids.length]):[];runtimeRotation=ids.length?(runtimeRotation+readIds.length)%ids.length:0;
+          await Promise.all(readIds.map(async id=>{try{const read=await proxy.request('thread/read',{threadId:id,includeTurns:false});if(read?.thread?.id!==id)throw new Error('Unsupported thread metadata');next.set(id,{...read.thread,__loaded:true,__readAt:context.now,__observerSequence:read.__observerSequence});}catch{const previous=next.get(id);next.set(id,{...previous,status:undefined,__readFailed:true});diagnostics.push(diagnostic(context,'codex-thread-read-unavailable','A loaded thread metadata read failed; its tab remains discoverable and task status is unknown.'));}}));
           liveThreads = next;
           if (!lastAllowance || now-lastAllowance >= 30_000) {
             lastAllowance = now;
@@ -118,7 +136,7 @@ export function createCodexAdapter(): ProviderAdapter {
         const byPath = new Map(discovered.flat().map(x => [x.path,x]));
         // Native metadata also discovers rollouts outside the dated directory layout.
         for (const thread of metadata) if (thread.rolloutPath && !byPath.has(thread.rolloutPath)) { const stat = await context.io.stat(thread.rolloutPath); if (stat) byPath.set(thread.rolloutPath,stat); }
-        const metadataTimes=new Map(metadata.map(row=>[row.id,row.lastAt??'']));files = [...byPath.values()].filter(file=>!observerIds.has(file.path.match(UUID)?.[1]??'')).sort((a,b) => (metadataTimes.get(b.path.match(UUID)?.[1]??'')??'').localeCompare(metadataTimes.get(a.path.match(UUID)?.[1]??'')??'')||b.mtimeMs-a.mtimeMs);
+        const metadataTimes=new Map(metadata.map(row=>[row.id,row.lastAt??'']));const nativePaths=new Map(metadata.filter(row=>row.rolloutPath).map(row=>[row.rolloutPath!,row.id]));files = [...byPath.values()].filter(file=>!observerIds.has(nativePaths.get(file.path)??filenameThreadId(file.path)??'')).sort((a,b) => (metadataTimes.get(nativePaths.get(b.path)??filenameThreadId(b.path)??'')??'').localeCompare(metadataTimes.get(nativePaths.get(a.path)??filenameThreadId(a.path)??'')??'')||b.mtimeMs-a.mtimeMs||a.path.localeCompare(b.path));
       }
       const indexPath = context.io.join(context.root,'session_index.jsonl');
       if (await context.io.stat(indexPath)) {
@@ -126,35 +144,66 @@ export function createCodexAdapter(): ProviderAdapter {
         if (!index.complete) diagnostics.push(diagnostic(context,'codex-name-index-backfill','Native session names are being backfilled.'));
       }
       const metadataByPath = new Map(metadata.filter(x => x.rolloutPath).map(x => [x.rolloutPath!,x]));
-      // Always update recent sources. Progressively backfill older history with bounded concurrency.
-      const priority = files.slice(0,12); const historical = files.slice(12); const batch = [...priority,...historical.slice(rotation,rotation+20)]; rotation = historical.length ? (rotation + 20) % historical.length : 0;
+      const preferredPaths=new Map(metadata.filter(row=>row.rolloutPath).map(row=>[row.id,row.rolloutPath!]));
+      const sourceId=(file:FileInfo):string|null=>string(headers.get(file.path)?.record.payload?.id??headers.get(file.path)?.record.payload?.thread_id)??metadataByPath.get(file.path)?.id??filenameThreadId(file.path);
+      const preferred=(a:FileInfo,b:FileInfo,id:string):number=>Number(b.path===preferredPaths.get(id))-Number(a.path===preferredPaths.get(id))||Number(/(?:^|[\\/])archived_sessions[\\/]/.test(a.path))-Number(/(?:^|[\\/])archived_sessions[\\/]/.test(b.path))||b.mtimeMs-a.mtimeMs||b.birthtimeMs-a.birthtimeMs||a.path.localeCompare(b.path);
+      // A conversation may have several rollover files. Choose one authoritative
+      // active source deterministically instead of racing parallel cache writes.
+      const activeSources=new Map<string,FileInfo>();selectedSources.clear();
+      for(const file of files){const id=sourceId(file),key=id??`path:${file.path}`,previous=activeSources.get(key);if(!previous||preferred(file,previous,id??'')<0)activeSources.set(key,file);}
+      const candidates=[...activeSources.values()];for(const file of candidates){const id=sourceId(file);if(id)selectedSources.set(id,file.path);}
+      // Loaded sources and changed files do not share the historical backfill
+      // cursor. A busy old conversation remains observable even with an old mtime.
+      const loaded=candidates.filter(file=>proxyReady&&liveThreads.has(sourceId(file)??''));
+      const busy=candidates.filter(file=>{const previous=sourceInfo.get(file.path);return!previous||file.identity!==previous.identity||file.size!==previous.size||file.mtimeMs!==previous.mtimeMs;}).slice(0,16);
+      const priority=[...new Map([...loaded,...busy,...candidates.slice(0,12)].map(file=>[file.path,file])).values()],priorityPaths=new Set(priority.map(file=>file.path));
+      const historical=candidates.filter(file=>!priorityPaths.has(file.path));const backfill=historical.length?Array.from({length:Math.min(20,historical.length)},(_,index)=>historical[(rotation+index)%historical.length]):[];rotation=historical.length?(rotation+backfill.length)%historical.length:0;
+      const batch=[...priority,...backfill];
       for (let offset = 0; offset < batch.length; offset += 4) await Promise.all(batch.slice(offset,offset+4).map(async file => {
-        const id = metadataByPath.get(file.path)?.id ?? file.path.match(UUID)?.[1]; if (!id) return;
+        let id=sourceId(file);
         try {
-          const currentInfo=await context.io.stat(file.path);if(!currentInfo)return;
-          let header=headers.get(file.path);if(!header||header.identity!==currentInfo.identity){const record=await canonicalHeader(context,currentInfo,id);if(record){header={identity:currentInfo.identity,record};headers.set(file.path,header);}}
-          const result = await context.ingest(file.path,() => initialCodexState(id),(state,record,meta)=>reduceCodex(state,record,{...meta,ingestedAt:context.now}));
-          if (!result.state.canonical) return;
-          if(result.state.observer){normalized.delete(id);states.delete(id);return;}
+          const currentInfo=await context.io.stat(file.path);if(!currentInfo)throw new Error('Source is temporarily unavailable');
+          let header=headers.get(file.path);if(!header||header.identity!==currentInfo.identity||currentInfo.size<(sourceInfo.get(file.path)?.size??0)){const record=await canonicalHeader(context,currentInfo);if(record){header={identity:currentInfo.identity,record};headers.set(file.path,header);}else header=undefined;}
+          id=string(header?.record.payload?.id??header?.record.payload?.thread_id)??id;if(!id)return;
+          const competing=selectedSources.get(id);if(competing&&competing!==file.path){const other=files.find(candidate=>candidate.path===competing);if(other&&preferred(currentInfo,other,id)>=0)return;}selectedSources.set(id,file.path);
+          const nativeId=id;
+          const result = await context.ingest(file.path,() => initialCodexState(nativeId),(state,record,meta)=>{
+            if(state.nativeId!==nativeId){for(const key of Object.keys(state))delete(state as unknown as Record<string,unknown>)[key];Object.assign(state,initialCodexState(nativeId),{identityRecovered:true});if(header)reduceCodex(state,header.record,{...meta,offset:0,ingestedAt:context.now});}
+            reduceCodex(state,record,{...meta,ingestedAt:context.now});
+          });
+          const identityRecovered=result.state.nativeId!==nativeId||(result.state as CodexState&{identityRecovered?:boolean}).identityRecovered===true;
           let state=result.state;
-          if(!result.complete&&header){let tail=tailCache.get(file.path);if(!tail||tail.identity!==currentInfo.identity||tail.size!==currentInfo.size||tail.mtimeMs!==currentInfo.mtimeMs||tail.generation!==result.generation){const observed=await readCodexTail(context,currentInfo,id,header.record);tail={identity:currentInfo.identity,size:currentInfo.size,mtimeMs:currentInfo.mtimeMs,generation:result.generation,state:observed};tailCache.set(file.path,tail);}state=mergeCodexObservations(result.state,tail.state);}else tailCache.delete(file.path);
-          states.set(id,state); const session = sessionFromState(state,context.namespace,'Codex rollout',context.now);
+          if(state.nativeId!==nativeId){state=initialCodexState(nativeId);if(header)reduceCodex(state,header.record,{source:file.path,offset:0,generation:result.generation,ingestedAt:context.now});}
+          if(!state.canonical)throw new Error('Canonical native metadata is not readable yet');
+          if(state.observer){normalized.delete(id);states.delete(id);return;}
+          if((!result.complete||identityRecovered)&&header){let tail=tailCache.get(file.path);if(!tail||tail.identity!==currentInfo.identity||tail.size!==currentInfo.size||tail.mtimeMs!==currentInfo.mtimeMs||tail.generation!==result.generation){const observed=await readCodexTail(context,currentInfo,id,header.record);tail={identity:currentInfo.identity,size:currentInfo.size,mtimeMs:currentInfo.mtimeMs,generation:result.generation,state:observed};tailCache.set(file.path,tail);}state=mergeCodexObservations(state,tail.state);}else tailCache.delete(file.path);
+          if(selectedSources.get(id)!==file.path)return;
+          sourceInfo.set(file.path,currentInfo);states.set(id,state); const session = sessionFromState(state,context.namespace,'Codex rollout',context.now);
           session.collection={lastCheckedAt:context.now,ingestedAt:result.bytesRead>0?context.now:normalized.get(id)?.collection?.ingestedAt??null,evidenceAt:state.lastAt,condition:result.complete?'current':'backfilling',reason:result.complete?'Native records reconciled':'Recent tail is observed; older source records are being backfilled'};
           if(!result.complete){if(session.task)session.task.coverage+=' Historical backfill is incomplete; recent tail evidence is included.';if(state.parent||state.fork||!state.modernTotal&&!state.legacyTotal){session.usage.provenance.quality=session.usage.value?'derived':'unavailable';session.usage.provenance.reason='Backfill is incomplete; consumption covers observed attributable responses only';}}
+          if(identityRecovered){if(session.task)session.task.coverage+=' A previous checkpoint used an obsolete rollout identity; canonical metadata and recent native history were recovered.';if(!state.modernTotal&&!state.legacyTotal){session.usage.provenance.quality=session.usage.value?'derived':'unavailable';session.usage.provenance.reason='An obsolete checkpoint identity was repaired; usage covers recovered attributable response records only.';}diagnostics.push(diagnostic(context,'codex-checkpoint-identity-recovered','A previous rollout identity was corrected from canonical metadata; recent native history was recovered and older response-only usage may be partial.'));}
           session.archived = /(?:^|[\\/])archived_sessions[\\/]/.test(file.path); normalized.set(id,session);
           if (!result.complete) diagnostics.push(diagnostic(context,'codex-backfill','Session history is being backfilled progressively; available metrics may be partial.'));
           if (result.errors) diagnostics.push(diagnostic(context,'codex-json-record-skipped','Malformed persisted records were skipped; complete later records remain observable.','warning'));
-        } catch { diagnostics.push(diagnostic(context,'codex-file-unavailable','A session source is temporarily unavailable or locked and will be retried.','warning')); }
+        } catch {if(id){const previous=normalized.get(id);if(previous?.collection)previous.collection={...previous.collection,condition:'unavailable',reason:'The native rollout could not be read during the latest collection attempt; cached evidence is retained and reading will be retried.'};}diagnostics.push(diagnostic(context,'codex-file-unavailable','A session source is temporarily unavailable or locked and will be retried.','warning')); }
       }));
       const sessions = new Map<string,Session>();
       for (const row of metadata) { const session = structuredClone(normalized.get(row.id) ?? emptySession('codex',context.namespace,row.id,'Codex native state database',context.now)); applyMetadata(session,row); sessions.set(row.id,session); }
       for (const [id,value] of normalized) if (!sessions.has(id)&&!observerIds.has(id)) sessions.set(id,structuredClone(value));
+      const prepareRuntime=(session:Session):void=>{
+        const state=states.get(session.nativeId),persisted=state?.lastTask?`${state.currentTurn??''}:${state.lastTask}`:'';let previous=turnStates.get(session.nativeId);
+        // A native turn boundary changes this fingerprint. Unchanged persisted
+        // history must not overwrite a newer runtime completion or open turn.
+        if(persisted&&previous?.persisted!==persisted){previous={open:state!.lastTask==='started',persisted};turnStates.set(session.nativeId,previous);}
+        session.runtime={...session.runtime,reachable:false,loaded:false,serverReachable:proxyReady,...(previous?{openTurn:previous.open}:{})};
+      };
+      for(const session of sessions.values())prepareRuntime(session);
       const allowances = new Map<string,Allowance>();
       for (const [id,state] of states) { const session = sessions.get(id); if (!session || !state.quota) continue; const quota = quotaFromSnapshot(state.quota.value,context.namespace,'Codex persisted rate-limit snapshot',state.quota.at,context.now); session.allowanceIds = quota.map(x => x.id); for (const window of quota) { const previous = allowances.get(window.id); if (!previous || window.usedPercent.provenance.observedAt > previous.usedPercent.provenance.observedAt) allowances.set(window.id,window); } }
       for (const window of liveAllowances) { const refreshed = {...window,usedPercent:{...window.usedPercent,provenance:{...window.usedPercent.provenance}}}; if (now-Date.parse(window.usedPercent.provenance.observedAt)>300_000 || window.resetsAt && Date.parse(window.resetsAt)<=now) refreshed.usedPercent.provenance.quality='stale'; allowances.set(window.id,refreshed); }
       for (const [id,thread] of liveThreads) {
         if (!proxyReady) break;
-        if(isObserverWorkspace(thread.cwd))continue;const session = sessions.get(id) ?? emptySession('codex',context.namespace,id,'Existing Codex app-server',context.now);
+        if(observerIds.has(id)||isObserverWorkspace(thread.cwd))continue;const session = sessions.get(id) ?? emptySession('codex',context.namespace,id,'Existing Codex app-server',context.now);if(!sessions.has(id))prepareRuntime(session);
         applyRuntime(session,thread,context,thread.__loaded === true); sessions.set(id,session);
       }
       for (const session of sessions.values()) {
@@ -163,6 +212,10 @@ export function createCodexAdapter(): ProviderAdapter {
         const title = Object.hasOwn(names,session.nativeId) ? names[session.nativeId] : undefined; if (title && session.nameSource !== 'native live name') { session.name = title.name; session.nameSource = 'native append-only naming index'; }
         const notification = proxy.notifications.get(`thread/name/updated:${session.nativeId}`); if (proxyReady && string(notification?.threadName ?? notification?.name)) { session.name = notification.threadName ?? notification.name; session.nameSource = 'native live name'; }
         const status = proxy.notifications.get(`thread/status/changed:${session.nativeId}`); if (proxyReady && status?.status&&newerRuntimeNotification(liveThreads.get(session.nativeId),status)) applyRuntime(session,{status:status.status},context,status.status.type !== 'notLoaded');
+        const turnStarted=proxy.notifications.get(`turn/started:${session.nativeId}`),turnCompleted=proxy.notifications.get(`turn/completed:${session.nativeId}`);
+        const turnEvent=turnStarted&&(!turnCompleted||turnStarted.__observerSequence>turnCompleted.__observerSequence)?{value:turnStarted,open:true}:turnCompleted?{value:turnCompleted,open:false}:null;
+        if(proxyReady&&turnEvent&&newerRuntimeNotification(liveThreads.get(session.nativeId),turnEvent.value)&&(!status||turnEvent.value.__observerSequence>status.__observerSequence))session.runtime.openTurn=turnEvent.open;
+        if(session.runtime.openTurn!==undefined){const state=states.get(session.nativeId);turnStates.set(session.nativeId,{open:session.runtime.openTurn,persisted:state?.lastTask?`${state.currentTurn??''}:${state.lastTask}`:''});}
         if (session.runtime.loaded && session.startedAt) session.timing.elapsedMs = metric(Math.max(0,now-Date.parse(session.startedAt)),'Codex existing daemon','session','derived','Wall-clock time since conversation creation',context.now);
         const usageEvent = proxy.notifications.get(`thread/tokenUsage/updated:${session.nativeId}`); if (proxyReady && usageEvent?.tokenUsage) { const total = usage(usageEvent.tokenUsage.total); if (total) session.usage = metric(total,'Codex runtime usage notification','session','reported',undefined,context.now); }
         if (session.parentId) session.name = session.nameSource === 'native ID' ? metadata.find(x => x.id === session.nativeId)?.title ?? session.name : session.name;

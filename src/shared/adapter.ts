@@ -19,4 +19,4 @@ export interface AdapterContext {
 }
 export interface AdapterResult { sessions: Session[]; allowances: Allowance[]; diagnostics: Diagnostic[] }
 export interface ProviderAdapter { provider: Provider; poll(context: AdapterContext): Promise<AdapterResult>; close?(): Promise<void> }
-export interface SourceRoot { provider: Provider; root: string; namespace: string; distro?: string; user?: string }
+export interface SourceRoot { provider: Provider; root: string; namespace: string; distro?: string; user?: string; overrideHome?: boolean }

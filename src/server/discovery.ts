@@ -35,7 +35,7 @@ export async function discoverRoots(config: MonitorConfig): Promise<{ roots: Sou
       for (const distro of distros) {
         // wsl --list --running is always checked before invoking a distribution, so stopped distros remain stopped.
         const helper = `import os,json,pwd\nu=pwd.getpwuid(os.getuid());r=[dict(user=u.pw_name,home=u.pw_dir,codex=os.environ.get('CODEX_HOME',u.pw_dir+'/.codex'),claude=os.environ.get('CLAUDE_CONFIG_DIR',u.pw_dir+'/.claude'))]\nfor d in ['/home']:\n if os.path.isdir(d):\n  for n in os.listdir(d):\n   p=d+'/'+n\n   if p!=u.pw_dir and os.access(p,os.R_OK):r.append(dict(user=n,home=p,codex=p+'/.codex',claude=p+'/.claude'))\nprint(json.dumps(r))`;
-        const probe = await command('python3', ['-c', helper], 7000, { provider: 'codex', root: '/', namespace: '', distro });
+        const probe = await command('python3', ['-c', helper], 7000, { provider: 'codex', root: '/', namespace: '', distro, overrideHome:false });
         try {
           if (probe.code !== 0) throw new Error('WSL helper unavailable');
           for (const u of JSON.parse(probe.stdout)) { add('codex', path.posix.join(u.home, '.codex'), distro, u.user); add('claude', path.posix.join(u.home, '.claude'), distro, u.user); add('codex', u.codex, distro, u.user); add('claude', u.claude, distro, u.user); }

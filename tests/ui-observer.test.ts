@@ -42,10 +42,36 @@ describe('automatic navigation eligibility', () => {
     expect(defaultSessions([a, b], now)).toEqual([a]);
   });
   it('adds new active tabs without discarding the explicitly selected history tab', () => {
-    const historical = session('old'), later = session('new'); later.runtime.reachable = true;
+    const historical = session('old'), later = session('new'); later.runtime.reachable = true; later.runtime.loaded = true; later.state = metric('idle', 'native runtime', 'runtime');
     expect(sessionTabs([historical, later], historical.id, now).map(value => value.id)).toEqual([later.id, historical.id]);
     const renamed = { ...historical, name: 'Native rename' };
     expect(sessionTabs([renamed, later], historical.id, now).find(value => value.id === historical.id)?.name).toBe('Native rename');
+  });
+  it('shows an existing unverified Codex conversation beside Claude while native history is backfilling', () => {
+    const claude = emptySession('claude', 'native', 'claude-live', 'claude agents --json');
+    claude.runtime.reachable = true; claude.runtime.loaded = true; claude.state = metric('idle', 'claude agents --json', 'runtime');
+    const codex = session('codex-existing'); codex.state = metric('unknown', 'existing Codex daemon unavailable', 'runtime', 'unavailable', 'Control socket could not be observed');
+    codex.collection = { condition: 'backfilling', lastCheckedAt: new Date(now).toISOString(), ingestedAt: new Date(now).toISOString(), evidenceAt: null, reason: 'Recent native tail recovered; older history is being backfilled' };
+    codex.activities = [{ id: 'native-tool', at: '2026-11-04T01:01:50Z', kind: 'tool', label: 'Read source', ingestedAt: new Date(now).toISOString() }];
+    expect(sessionTabs([claude, codex], claude.id, now).map(s => s.id)).toEqual([claude.id, codex.id]);
+    expect(codex.runtime.reachable).toBe(false); expect(codex.state.value).toBe('unknown');
+    codex.task = { id: 'codex-task', revision: 1, objective: 'Previous native turn finished', startedAt: '2026-11-04T01:00:00Z', lastActivityAt: '2026-11-04T01:01:50Z', turnId: null, state: 'complete', items: [], coverage: 'Native completed-turn evidence', instructionsRecovered: true };
+    expect(defaultSessions([claude, codex], now).map(s => s.id)).toEqual([claude.id, codex.id]);
+  });
+  it('does not admit readable notLoaded history, old events with fresh ingestion, or metadata-only updates', () => {
+    const readableHistory = session('not-loaded'); readableHistory.runtime.reachable = true; readableHistory.runtime.loaded = false;
+    const old = session('old-events'); old.collection = { condition: 'backfilling', lastCheckedAt: new Date(now).toISOString(), ingestedAt: new Date(now).toISOString(), evidenceAt: null, reason: 'Reading history' };
+    old.activities = [{ id: 'old', at: new Date(now - 3600000).toISOString(), kind: 'tool', label: 'Old event', ingestedAt: new Date(now).toISOString() }];
+    expect(defaultSessions([readableHistory, old, session('metadata-only')], now)).toEqual([]);
+    const stale = session('stale'); stale.activities = [{ id: 'recent', at: new Date(now - 1000).toISOString(), kind: 'tool', label: 'Recent event' }];
+    stale.collection = { condition: 'stale', lastCheckedAt: new Date(now).toISOString(), ingestedAt: new Date(now).toISOString(), evidenceAt: new Date(now - 1000).toISOString(), reason: 'Source stopped responding' };
+    expect(defaultSessions([stale], now)).toEqual([]);
+  });
+  it('allows independent recent standalone events despite daemon notLoaded metadata without declaring a live runtime', () => {
+    const standalone = session('standalone'); standalone.runtime.reachable = true; standalone.runtime.loaded = false;
+    standalone.activities = [{ id: 'standalone-tool', at: '2026-11-04T01:01:50Z', kind: 'tool', label: 'Standalone native tool event' }];
+    expect(defaultSessions([standalone], now)).toEqual([standalone]);
+    expect(standalone.runtime.loaded).toBe(false); expect(standalone.state.value).toBe('historical');
   });
 });
 

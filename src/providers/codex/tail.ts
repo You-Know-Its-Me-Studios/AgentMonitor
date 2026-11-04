@@ -3,9 +3,9 @@ import { mergeTaskEvidence } from '../../server/task-evidence.js';
 import { initialCodexState, reduceCodex, type CodexState } from './parser.js';
 import { readRecentUserItems } from './sqlite.js';
 
-export async function canonicalHeader(context:AdapterContext,file:FileInfo,id:string):Promise<any|null>{
+export async function canonicalHeader(context:AdapterContext,file:FileInfo,id?:string):Promise<any|null>{
   const bytes=await context.io.read(file.path,0,Math.min(file.size,512*1024));const end=bytes.indexOf(10);if(end<0)return null;
-  try{const record=JSON.parse(bytes.subarray(0,end).toString('utf8').replace(/^\uFEFF/,''));return record.type==='session_meta'&&record.payload?.id===id?record:null;}catch{return null;}
+  try{const record=JSON.parse(bytes.subarray(0,end).toString('utf8').replace(/^\uFEFF/,''));const nativeId=record.payload?.id??record.payload?.thread_id;return record.type==='session_meta'&&typeof nativeId==='string'&&nativeId.length>0&&nativeId.length<=512&&nativeId!=='prototype'&&!Object.hasOwn(Object.prototype,nativeId)&&(!id||nativeId===id)?record:null;}catch{return null;}
 }
 export async function readCodexTail(context:AdapterContext,file:FileInfo,id:string,header:any,budget=4*1024*1024):Promise<CodexState>{
   const state=initialCodexState(id);reduceCodex(state,header,{source:file.path,offset:0,generation:0,ingestedAt:context.now});

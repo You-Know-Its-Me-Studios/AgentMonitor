@@ -8,6 +8,7 @@ import { createClaudeAdapter } from '../providers/claude/index.js';
 import { ObserverService } from './observer/service.js';
 import { createObserverWorker } from './observer/worker.js';
 import { readBuildIdentity, createLifecycle, writeProcessRecord } from './lifecycle.js';
+import { logError } from './errors.js';
 
 const workspace = path.resolve(process.env.AGENT_MONITOR_WORKSPACE || process.cwd());
 const config = await loadConfig(workspace);
@@ -25,13 +26,14 @@ store.migrateReducers('task-evidence-v2');
 const collector = new Collector(store, config, root => root.provider === 'codex' ? createCodexAdapter() : createClaudeAdapter());
 collector.current.build = build;
 const observer = new ObserverService(store, createObserverWorker(workspace));
-observer.on('change', state => collector.setObserver(state));
-collector.on('snapshot', snapshot => observer.observe(snapshot));
+observer.on('change', state => { try { collector.setObserver(state); } catch (error) { logError('Observer snapshot delivery', error); } });
+collector.on('snapshot', snapshot => { try { observer.observe(snapshot); } catch (error) { logError('Observer evidence delivery', error); } });
 const clientDir = path.join(workspace, 'dist/client');
 let app: Awaited<ReturnType<typeof createApp>>;
 let closing = false;
 const close = async () => { if (closing) return; closing = true; await observer.close(); await collector.close(); app.server.closeAllConnections(); await app.close(); store.close(); process.exit(0); };
-const lifecycle = createLifecycle(build, () => { void close(); });
+const requestClose = () => { void close().catch(error => { logError('Dashboard shutdown', error); }); };
+const lifecycle = createLifecycle(build, requestClose);
 app = await createApp({ collector, port, clientDir, workspace, observer, lifecycle });
 try { await app.listen({ port, host: '127.0.0.1' }); }
 catch (e) {
@@ -44,8 +46,8 @@ catch (e) {
 }
 try { await writeProcessRecord(workspace, port, lifecycle); }
 catch (error) { await observer.close(); await collector.close(); await app.close(); store.close(); throw error; }
-console.log(`Agent Monitor: http://127.0.0.1:${port}`);
+console.log(`${new Date().toISOString()} Agent Monitor: http://127.0.0.1:${port} (PID ${process.pid}, build ${build.id}, instance ${lifecycle.instanceId})`);
 console.log('Local deterministic collection; selected-task AI assessments use isolated CLI workers.');
-void observer.start().catch(error => { console.error('Observer capability detection failed:', error instanceof Error ? error.message : 'Unknown error'); });
-void collector.start().catch(error => { console.error('Collector startup failed:', error instanceof Error ? error.message : 'Unknown error'); });
-process.on('SIGINT', close); process.on('SIGTERM', close);
+void observer.start().catch(error => { logError('Observer startup', error); });
+void collector.start().catch(error => { logError('Collector startup', error); });
+process.on('SIGINT', requestClose); process.on('SIGTERM', requestClose);

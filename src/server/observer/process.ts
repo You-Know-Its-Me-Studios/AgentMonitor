@@ -3,6 +3,7 @@ import { promises as fs, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { ObserverFailure } from '../../shared/observer.js';
+import { logError } from '../errors.js';
 
 export class ObserverWorkerError extends Error {
   constructor(readonly code: ObserverFailure['code'], message: string) { super(message); this.name = 'ObserverWorkerError'; }
@@ -43,7 +44,7 @@ export function createObserverProcessRunner(): ObserverProcessRunner {
         try { child = spawn(command.executable,command.args,{cwd:command.cwd,env:command.env,windowsHide:true,detached:process.platform !== 'win32',stdio}); }
         catch (e) { reject(e); return; }
         children.add(child); let done = false, failure: ObserverWorkerError | null = null; let outBytes = 0, errBytes = 0; const out: Buffer[] = [], err: Buffer[] = [];
-        const fail = (error: ObserverWorkerError) => { if (failure || done) return; failure = error; void stop(child); };
+        const fail = (error: ObserverWorkerError) => { if (failure || done) return; failure = error; void stop(child).catch(error => { logError('Observer process shutdown', error); }); };
         const timeout = setTimeout(() => fail(new ObserverWorkerError('timeout',`Observer assessment exceeded ${Math.round(command.timeoutMs/1000)} seconds.`)),command.timeoutMs);
         const abort = () => fail(new ObserverWorkerError('superseded','Observer assessment was superseded.'));
         command.signal?.addEventListener('abort',abort,{once:true});
@@ -52,7 +53,9 @@ export function createObserverProcessRunner(): ObserverProcessRunner {
         const cleanup = () => { done = true; clearTimeout(timeout); if (fileLimit) clearInterval(fileLimit); command.signal?.removeEventListener('abort',abort); children.delete(child); };
         child.stdout?.on('data',(chunk: Buffer) => { outBytes += chunk.length; if (outBytes > max) fail(new ObserverWorkerError('invalid-output','Observer CLI output exceeded the bounded response limit.')); else out.push(chunk); });
         child.stderr?.on('data',(chunk: Buffer) => { errBytes += chunk.length; if (errBytes > errMax) fail(new ObserverWorkerError('invalid-output','Observer diagnostic output exceeded its limit.')); else err.push(chunk); });
-        child.stdin?.on('error',error => { if (!done && (error as NodeJS.ErrnoException).code !== 'EPIPE') fail(new ObserverWorkerError('provider-error','Observer input could not be delivered.')); });
+        child.stdin?.on('error',error => { if (!done && (error as NodeJS.ErrnoException).code !== 'EPIPE') fail(new ObserverWorkerError('provider-error',`Observer input failed: ${logError('Observer stdin', error)}`)); });
+        child.stdout?.on('error',error => { if (!done) fail(new ObserverWorkerError('provider-error',`Observer output failed: ${logError('Observer stdout', error)}`)); });
+        child.stderr?.on('error',error => { if (!done) fail(new ObserverWorkerError('provider-error',`Observer diagnostics failed: ${logError('Observer stderr', error)}`)); });
         child.on('error',error => { if (done) return; cleanup(); reject(error); });
         child.on('close',async code => {
           if (done) return; cleanup();
@@ -74,7 +77,8 @@ export function createObserverProcessRunner(): ObserverProcessRunner {
         if (process.platform === 'win32' && !command.fileStdio && (error as NodeJS.ErrnoException).code === 'EPERM') return execute(command,true);
         if (error instanceof ObserverWorkerError) throw error;
         const code = (error as NodeJS.ErrnoException).code;
-        throw new ObserverWorkerError(code === 'ENOENT' ? 'unavailable' : 'provider-error',code === 'ENOENT' ? 'The selected observer CLI executable is unavailable.' : 'The observer CLI process could not be started.');
+        const cause = logError('Observer process execution', error);
+        throw new ObserverWorkerError(code === 'ENOENT' ? 'unavailable' : 'provider-error',`Observer CLI execution failed: ${cause}`);
       }
     },
     async close() { closed = true; await Promise.all([...children].map(stop)); }

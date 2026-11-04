@@ -52,8 +52,11 @@ export class CacheStore {
     let buffer = await io.read(file, offset, Math.min(budget, Math.max(0, info.size - offset)));
     // A single large record can span a chunk. Grow only to a fixed ceiling, never the whole history.
     if (!dropping && buffer.length && buffer.indexOf(10) < 0 && info.size - offset > buffer.length && buffer.length < 16 * 1024 * 1024) buffer = await io.read(file, offset, Math.min(16 * 1024 * 1024, info.size - offset));
-    let cursor = 0, committed = offset;
+    let cursor = 0, committed = offset, yieldedAt = performance.now();
     for (;;) {
+      // Historical JSONL reduction shares the HTTP event loop. Yield between
+      // records rather than monopolizing it for a full backfill chunk.
+      if (performance.now() - yieldedAt >= 8) { await new Promise<void>(resolve => setImmediate(resolve)); yieldedAt = performance.now(); }
       const end = buffer.indexOf(10, cursor); if (end < 0) break;
       const line = buffer.subarray(cursor, end); const recordOffset = offset + cursor; cursor = end + 1; committed = offset + cursor;
       if(dropping){dropping=false;continue;}

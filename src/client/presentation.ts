@@ -1,36 +1,41 @@
 import type { Activity, Diagnostic, Session } from '../shared/types.js';
 import { compareTimestampsNewestFirst, epochMilliseconds, relativeAge } from '../shared/time.js';
+import { sessionEligibility } from '../shared/lifecycle.js';
 
 export function chronologicalActivities(activities: Activity[]): Activity[] {
   return activities.slice().sort((a, b) => compareTimestampsNewestFirst(a.occurredAt ?? a.at, b.occurredAt ?? b.at) || a.id.localeCompare(b.id));
 }
 export function attributedActivityAt(session: Session): string | null {
-  const candidates = [session.collection?.evidenceAt, session.task?.lastActivityAt, ...session.activities.map(a => a.occurredAt ?? a.at)];
-  return candidates.filter((value): value is string => typeof value === 'string' && epochMilliseconds(value) !== null).sort(compareTimestampsNewestFirst)[0] ?? null;
+  return sessionEligibility(session, Date.now()).activityAt;
 }
 export function reportedActivityAt(session: Session): string | null {
   const candidates = [attributedActivityAt(session), session.lastActivityAt];
   return candidates.filter((value): value is string => typeof value === 'string' && epochMilliseconds(value) !== null).sort(compareTimestampsNewestFirst)[0] ?? null;
 }
 export function runtimePresentation(session: Session, now: number, diagnostics: Diagnostic[] = []) {
-  const collection = session.collection?.condition;
+  const eligibility = sessionEligibility(session, now);
+  const collection = eligibility.collectionCondition;
   const sourceFailure = [...session.diagnostics, ...diagnostics.filter(d => d.provider === session.provider && (!d.namespace || d.namespace === session.namespace))].find(d => d.level !== 'info' && !/account|quota|allowance|rate.limit/i.test(d.code) && /runtime|daemon|proxy|agents|process|registry|source|unavailable/i.test(d.code));
   const reasons = [collection === 'stale' || collection === 'unavailable' ? session.collection?.reason : null, session.state.provenance.reason, sourceFailure?.message].filter((value): value is string => Boolean(value));
   const condition = [...new Set(reasons)].join(' ') || session.collection?.reason || 'No supported runtime interface has confirmed the current process or task state.';
-  const evidenceAt = attributedActivityAt(session);
-  const evidence = epochMilliseconds(evidenceAt);
-  const verified = session.runtime.reachable && session.state.provenance.quality !== 'stale' && collection !== 'stale' && collection !== 'unavailable';
-  if (collection === 'unavailable') return { label: 'Collection unavailable', tone: 'unavailable', verified: false, evidenceAt, condition, detail: `Runtime unverified. ${condition}` };
-  if (collection === 'stale' || session.state.provenance.quality === 'stale') return { label: 'Collection stale', tone: 'stale', verified: false, evidenceAt, condition, detail: `Runtime unverified. ${condition}` };
+  const evidenceAt = eligibility.activityAt;
+  const verified = eligibility.runtimeConfirmed;
+  const openRecord = eligibility.lifecycle === 'open' ? 'The last recorded turn or task remains open. ' : '';
   if (verified) {
     const names = { running: 'Running', idle: 'Idle', approval: 'Waiting for approval', input: 'Waiting for input', complete: 'Task complete' };
     const state = session.state.value;
-    const label = state && state in names ? names[state as keyof typeof names] : 'Runtime reachable';
-    return { label, tone: state ?? 'idle', verified: true, evidenceAt, condition: sourceFailure?.message ?? 'Confirmed by the native runtime interface.', detail: `Runtime confirmed. ${sourceFailure?.message ?? 'The native runtime interface is reachable.'}` };
+    const statusFresh = session.state.provenance.quality === 'reported';
+    const label = statusFresh && state && state in names ? names[state as keyof typeof names] : 'Runtime loaded';
+    return { label, tone: statusFresh ? state ?? 'idle' : 'idle', verified: true, evidenceAt, condition, detail: `Loaded runtime confirmed. ${!statusFresh ? 'Current task status is awaiting a readable native response. ' : ''}${condition}` };
   }
+  if (collection === 'unavailable') return { label: 'Collection unavailable', tone: 'unavailable', verified: false, evidenceAt, condition, detail: `Runtime unverified. ${openRecord}${condition}` };
+  if (collection === 'stale') return { label: 'Collection stale', tone: 'stale', verified: false, evidenceAt, condition, detail: `Runtime unverified. ${openRecord}${condition}` };
   if (session.archived) return { label: 'Historical session', tone: 'historical', verified: false, evidenceAt, condition, detail: `Archived native history. Runtime unverified. ${condition}` };
-  if (evidence !== null && evidence <= now + 60000 && now - evidence <= 30 * 60000) return { label: 'Activity observed', tone: 'observed', verified: false, evidenceAt, condition, detail: `Source activity ${relativeAge(evidenceAt, now)}. Runtime unverified. ${condition}` };
-  if (session.state.value === 'historical') return { label: 'Historical session', tone: 'historical', verified: false, evidenceAt, condition, detail: `Persisted native history. Runtime unverified. ${condition}` };
+  if (eligibility.lifecycle === 'open') return { label: session.runtime.openTurn === true ? 'Recorded turn open' : 'Task recorded active', tone: 'observed', verified: false, evidenceAt, condition, detail: `${eligibility.defaultReason} ${evidenceAt ? `Last source activity ${relativeAge(evidenceAt, now)}. ` : ''}${condition}` };
+  if (eligibility.lifecycle === 'historical') return { label: 'Historical session', tone: 'historical', verified: false, evidenceAt, condition, detail: `Persisted native history. Runtime unverified. ${condition}` };
+  if (session.runtime.openTurn === false) return { label: 'Recorded turn closed', tone: 'historical', verified: false, evidenceAt, condition, detail: `The last native turn is recorded closed. Runtime unverified. ${condition}` };
+  if (eligibility.lifecycle === 'complete' || eligibility.lifecycle === 'paused') return { label: eligibility.lifecycle === 'complete' ? 'Recorded task complete' : 'Recorded task paused', tone: 'historical', verified: false, evidenceAt, condition, detail: `Recorded task lifecycle: ${eligibility.lifecycle}. Runtime unverified. ${condition}` };
+  if (evidenceAt) return { label: 'Activity observed', tone: 'observed', verified: false, evidenceAt, condition, detail: `Source activity ${relativeAge(evidenceAt, now)}. Runtime unverified. ${condition}` };
   return { label: 'Runtime unverified', tone: 'unknown', verified: false, evidenceAt, condition, detail: condition };
 }
 export function limitSessionTabs(sessions: Session[], selectedId: string | null, limit: number): Session[] {

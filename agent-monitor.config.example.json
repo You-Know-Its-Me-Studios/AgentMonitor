@@ -1,0 +1,6 @@
+{
+  "port": 4317,
+  "pollMs": 2000,
+  "wsl": true,
+  "roots": []
+}

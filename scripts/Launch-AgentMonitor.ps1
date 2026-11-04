@@ -10,6 +10,7 @@ $logs = Join-Path $workspace '.agent-monitor\logs'
 $serverLog = Join-Path $logs 'server.log'
 $errorLog = Join-Path $logs 'error.log'
 $startupLog = Join-Path $logs 'startup.log'
+$setupLog = Join-Path $logs 'setup.log'
 $instancePath = Join-Path $workspace '.agent-monitor\server-instance.json'
 $processRecordPath = Join-Path $workspace '.agent-monitor\server-process.json'
 $mutex = $null
@@ -33,6 +34,16 @@ function Get-MonitorHealth([string]$Address) {
     } catch {
         return $null
     }
+}
+
+function Get-StartupFailureDetail {
+    if (-not (Test-Path -LiteralPath $errorLog)) { return 'No server error log was produced.' }
+    $detail = (Get-Content -LiteralPath $errorLog -Tail 24 -ErrorAction SilentlyContinue) -join "`r`n"
+    $detail = $detail -replace '(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{16,}|github_pat_[a-z0-9_]{16,})\b', '[redacted]'
+    $detail = $detail -replace '(?i)(Bearer\s+)[a-z0-9._~+/-]{12,}', '$1[redacted]'
+    $detail = $detail -replace '(?i)((?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s,;"'']{6,}', '$1[redacted]'
+    if ([string]::IsNullOrWhiteSpace($detail)) { return 'The server has not written an error; inspect server.log for startup output.' }
+    return $detail.Substring(0, [Math]::Min(2400, $detail.Length))
 }
 
 function Assert-MonitorIdentity($Health) {
@@ -153,16 +164,21 @@ try {
     try { $digest = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($workspace.ToLowerInvariant()))).Replace('-', '').Substring(0, 32) }
     finally { $sha.Dispose() }
     $mutex = [System.Threading.Mutex]::new($false, "Local\YKIMS.AgentMonitor.$digest")
-    try { $ownsMutex = $mutex.WaitOne(30000) }
+    try { $ownsMutex = $mutex.WaitOne(600000) }
     catch [System.Threading.AbandonedMutexException] { $ownsMutex = $true }
-    if (-not $ownsMutex) { throw 'Another launch is still starting Agent Monitor. Try the shortcut again in a moment.' }
+    if (-not $ownsMutex) { throw 'Another launch is still installing, building, or starting Agent Monitor. Check .agent-monitor\logs\setup.log and try again when it finishes.' }
     Write-StartupLog 'Launch requested'
+
+    $setupScript = Join-Path $workspace 'scripts\Setup-AgentMonitor.ps1'
+    if (-not (Test-Path -LiteralPath $setupScript)) { throw 'The source download is incomplete: scripts\Setup-AgentMonitor.ps1 is missing. Download or clone the complete repository again.' }
+    $monitorSetup = & $setupScript -LogPath $setupLog
+    $nodePath = $monitorSetup.NodePath
 
     $serverPath = Join-Path $workspace 'dist\server\main.js'
     $clientPath = Join-Path $workspace 'dist\client\index.html'
     $buildPath = Join-Path $workspace 'dist\build.json'
     if (-not (Test-Path -LiteralPath $serverPath) -or -not (Test-Path -LiteralPath $clientPath) -or -not (Test-Path -LiteralPath $buildPath)) {
-        throw "The production build is missing or predates build identity support. Open this folder in a terminal and run npm install, then npm run build. Folder: $workspace"
+        throw "Setup did not produce a complete production build. See $setupLog"
     }
     $build = Get-Content -LiteralPath $buildPath -Raw | ConvertFrom-Json
     if ([string]$build.id -notmatch '^[a-f0-9]{64}$') { throw 'The production build identity is invalid. Run npm run build before launching.' }
@@ -195,36 +211,27 @@ try {
         $ready = $false
     }
     if (-not $ready) {
-        $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-        if ($null -eq $nodeCommand) { $nodeCommand = Get-Command node -ErrorAction SilentlyContinue }
-        if ($null -eq $nodeCommand) { throw 'Node.js LTS is required. Install Node.js 22.13 or a newer supported LTS release, then use this shortcut again.' }
-        $nodePath = $nodeCommand.Source
-        $version = (& $nodePath --version | Out-String).Trim()
-        if ($version -notmatch '^v(\d+)\.(\d+)\.') { throw 'The installed Node.js version could not be determined.' }
-        $major = [int]$Matches[1]
-        $minor = [int]$Matches[2]
-        if ($major -lt 22 -or ($major -eq 22 -and $minor -lt 13) -or ($major % 2 -ne 0)) {
-            throw "Node.js $version is unsupported. Use Node.js 22.13 or a newer supported LTS release."
-        }
         New-Item -ItemType Directory -Path $logs -Force | Out-Null
         $env:AGENT_MONITOR_WORKSPACE = $workspace
         $env:AGENT_MONITOR_PORT = [string]$port
         # The only command-line argument is a literal, quoted path. No shell evaluates workspace text.
         $serverArgument = '"' + $serverPath + '"'
         $server = Start-Process -FilePath $nodePath -ArgumentList $serverArgument -WorkingDirectory $workspace -WindowStyle Hidden -RedirectStandardOutput $serverLog -RedirectStandardError $errorLog -PassThru
+        Write-StartupLog "Started dashboard PID $($server.Id), build $desiredBuildId"
         $deadline = [DateTime]::UtcNow.AddSeconds(30)
         while ([DateTime]::UtcNow -lt $deadline) {
             $health = Get-MonitorHealth $address
             if (Assert-MonitorIdentity $health) {
                 if ([string]$health.buildId -cne $desiredBuildId) { throw 'The localhost server is still serving a different build. It was not accepted as ready.' }
+                if ([int]$health.pid -ne $server.Id) { throw 'A different process answered readiness; the launched dashboard was not accepted.' }
                 $ready = $true; break
             }
-            if ($server.HasExited) { throw "Agent Monitor exited during startup. See $errorLog and $serverLog" }
+            if ($server.HasExited) { throw "Agent Monitor exited during startup (exit $($server.ExitCode)).`r`n$(Get-StartupFailureDetail)" }
             Start-Sleep -Milliseconds 300
         }
         if (-not $ready) {
             if (-not $server.HasExited) { $server.Kill() }
-            throw "Agent Monitor did not become ready within 30 seconds. See $errorLog and $serverLog"
+            throw "Agent Monitor did not become ready within 30 seconds.`r`n$(Get-StartupFailureDetail)"
         }
     }
     @{ port = $port; workspace = $workspace } | ConvertTo-Json -Compress | Set-Content -LiteralPath $instancePath -Encoding UTF8
@@ -236,7 +243,7 @@ try {
     $message = $message -replace '(?i)sk-[a-z0-9_-]{16,}', '[redacted]'
     try { Write-StartupLog "ERROR $message" }
     catch { Write-Warning 'The startup log could not be written. Check write access to this application folder.' }
-    $message = "$message`r`n`r`nStartup log: $startupLog`r`nServer logs: $serverLog and $errorLog"
+    $message = "$message`r`n`r`nSetup log: $setupLog`r`nStartup log: $startupLog`r`nServer logs: $serverLog and $errorLog"
     if (-not $NonInteractive) {
         try {
             $shell = New-Object -ComObject WScript.Shell

@@ -5,6 +5,8 @@ import { openSync, closeSync } from 'node:fs';
 import os from 'node:os';
 import { promisify } from 'node:util';
 import type { CommandResult, FileInfo, ProcessIdentity, SourceIO, SourceRoot } from '../shared/adapter.js';
+import { resolveExecutable } from './executables.js';
+import { logError } from './errors.js';
 
 const exec = promisify(execFile);
 export async function command(executable: string, args: string[], timeoutMs = 8000, root?: SourceRoot): Promise<CommandResult> {
@@ -12,17 +14,14 @@ export async function command(executable: string, args: string[], timeoutMs = 80
   if (root?.distro) {
     const running = await command('wsl.exe', ['--list', '--running', '--quiet'], Math.min(timeoutMs, 4000));
     if (running.code !== 0 || !running.stdout.replace(/\0/g, '').split(/[\r\n]+/).map(x => x.trim()).includes(root.distro)) return { code: null, stdout: '', stderr: 'WSL distribution is not confirmed running; observation skipped' };
-    cmd = 'wsl.exe'; argv = ['--distribution', root.distro, ...(root.user ? ['--user', root.user] : []), '--exec', 'env', `${root.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'}=${root.root}`, executable, ...args];
-  } else if (process.platform === 'win32' && executable === 'codex') {
-    const packageRoot = process.env.CODEX_MANAGED_PACKAGE_ROOT || path.join(process.env.APPDATA || '', 'npm/node_modules/@openai/codex');
-    cmd = process.execPath; argv = [path.join(packageRoot, 'bin/codex.js'), ...args];
-  } else if (process.platform === 'win32' && executable === 'claude') {
-    const known = path.join(process.env.USERPROFILE || '', '.local/bin/claude.exe');
-    if (await fs.stat(known).catch(() => null)) cmd = known;
+    cmd = 'wsl.exe'; argv = ['--distribution', root.distro, ...(root.user && root.user !== 'default' ? ['--user', root.user] : []), '--exec', ...(root.overrideHome === false ? [] : ['env', `${root.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'}=${root.root}`]), executable, ...args];
+  } else {
+    try { const resolved = await resolveExecutable(executable, args); cmd = resolved.executable; argv = resolved.args; }
+    catch (error) { return { code: null, stdout: '', stderr: error instanceof Error ? error.message : 'CLI executable resolution failed' }; }
   }
   try {
     const env = { ...process.env };
-    if (root && !root.distro) env[root.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'] = root.root;
+    if (root && !root.distro && root.overrideHome !== false) env[root.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'] = root.root;
     const encoding = executable === 'wsl.exe' && args.includes('--list') ? 'utf16le' : 'utf8';
     const result = await exec(cmd, argv, { timeout: timeoutMs, maxBuffer: 24 * 1024 * 1024, windowsHide: true, encoding, env });
     return { stdout: result.stdout, stderr: result.stderr, code: 0 };
@@ -40,7 +39,7 @@ async function commandViaFiles(cmd: string, args: string[], timeout: number, roo
   const outFd = openSync(out, 'wx', 0o600), errFd = openSync(err, 'wx', 0o600);
   try {
     const env = { ...process.env };
-    if (root && !root.distro) env[root.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'] = root.root;
+    if (root && !root.distro && root.overrideHome !== false) env[root.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'] = root.root;
     const code = await new Promise<number | null>((resolve, reject) => {
       let child; try { child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', outFd, errFd], env }); } catch (e) { reject(e); return; }
       const timer = setTimeout(() => { child.kill(); resolve(null); }, timeout);
@@ -51,7 +50,7 @@ async function commandViaFiles(cmd: string, args: string[], timeout: number, roo
     if ((await fs.stat(out)).size > max || (await fs.stat(err)).size > max) return { stdout: '', stderr: 'CLI response exceeded the observation limit', code: null };
     const encoding = cmd === 'wsl.exe' && args.includes('--list') ? 'utf16le' : 'utf8';
     return { code, stdout: await fs.readFile(out, encoding), stderr: await fs.readFile(err, encoding) };
-  } catch { return { stdout: '', stderr: 'Read-only CLI command is unavailable in this environment', code: null }; }
+  } catch (error) { return { stdout: '', stderr: logError('Read-only CLI file capture', error), code: null }; }
   finally { closeSync(outFd); closeSync(errFd); await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }
 export class NativeIO implements SourceIO {

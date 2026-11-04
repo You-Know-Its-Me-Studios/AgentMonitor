@@ -66,7 +66,8 @@ export function applyClaudeRuntime(session:Session,external:ExternalSession,now:
   if(typeof external.name==='string' && external.name.trim()){session.name=cleanText(external.name,4000)??session.name;session.nameSource='Native live name';}
   if(typeof external.cwd==='string'){session.cwd=cleanText(external.cwd,2048);session.project=session.cwd?.split(/[\\/]/).filter(Boolean).at(-1)??null;}
   const processAlive=typeof external.pid==='number' && typeof external.status==='string';
-  session.runtime={reachable:processAlive,loaded:processAlive,attachment:processAlive&&external.kind==='interactive'?'known':'unknown',pid:external.pid??null,processStartedAt:iso(external.startedAt),observedAt:now};
+  const openTurn=['done','failed','stopped'].includes(external.state??'')?false:['working','blocked'].includes(external.state??'')?true:external.status==='busy'||external.status==='waiting'?true:external.status==='idle'?false:undefined;
+  session.runtime={reachable:processAlive,loaded:processAlive,attachment:processAlive&&external.kind==='interactive'?'known':'unknown',pid:external.pid??null,processStartedAt:iso(external.startedAt),observedAt:now,openTurn,serverReachable:true};
   session.startedAt ||= iso(external.startedAt);
   let state:NonNullable<Session['state']['value']>='unknown';
   if(external.state==='done')state='complete';
@@ -114,23 +115,29 @@ function mergeObservedTail(prefix:ClaudeState,tail:ClaudeState):ClaudeState {
 }
 
 export function createClaudeAdapter():ProviderAdapter {
-  let helpChecked=false,supported=false,allSupported=false,lastListingAt=0,cachedListing:ExternalSession[]=[],listingHealthy=false;
+  let supported=false,allSupported=false,capability:'pending'|'supported'|'unsupported'|'retrying'='pending',helpFailures=0,nextHelpAt=0;
+  let nextListingAt=0,listFailures=0,lastListingObservedAt:string|null=null,cachedListing:ExternalSession[]=[],listingHealthy=false;
   let lastFilesAt=0,cachedFiles:TranscriptFile[]=[];
   const transcriptCache=new Map<string,{session:Session;complete:boolean;size:number;mtimeMs:number;identity:string;processedAt:number}>();
   const tailCache=new Map<string,{size:number;mtimeMs:number;identity:string;generation:number;state:ClaudeState}>();
   const excludedFiles=new Set<string>();
   return {provider:'claude',async poll(ctx):Promise<AdapterResult>{
     const diagnostics:Diagnostic[]=[];
-    if(!helpChecked){
-      const help=await ctx.command('claude',['agents','--help'],6000);supported=help.code===0 && /--json\b/.test(help.stdout);allSupported=/--all\b/.test(help.stdout);helpChecked=true;
-      if(!supported)diagnostics.push(diag(ctx,'claude-external-list-unavailable','Installed Claude does not expose a verified noninteractive session listing. Using passive transcripts and validated registry hints.','warning'));
+    const failedFiles=new Set<string>();
+    const now=Date.parse(ctx.now);
+    if(now>=nextHelpAt){
+      const help=await ctx.command('claude',['agents','--help'],6000);
+      if(help.code===0&&(/--json\b/.test(help.stdout)||/\b(?:Usage|Options):/i.test(help.stdout))){const previouslySupported=supported;supported=/--json\b/.test(help.stdout);allSupported=supported&&/--all\b/.test(help.stdout);capability=supported?'supported':'unsupported';if(!supported)listingHealthy=false;else if(!previouslySupported)nextListingAt=0;helpFailures=0;nextHelpAt=now+5*60000;}
+      else{helpFailures++;capability='retrying';nextHelpAt=now+Math.min(60000,2000*2**Math.min(5,helpFailures-1));}
     }
-    if(supported && Date.parse(ctx.now)-lastListingAt>=3000){
-      lastListingAt=Date.parse(ctx.now);
+    if(capability==='retrying')diagnostics.push(diag(ctx,'claude-capability-retry','Claude capability help is temporarily unavailable. Detection will retry with bounded backoff; this does not establish an unsupported CLI.','warning'));
+    else if(capability==='unsupported')diagnostics.push(diag(ctx,'claude-external-list-unavailable','Successful native help does not advertise JSON session listing. Passive transcripts and validated registry hints remain available.'));
+    if(supported && now>=nextListingAt){
       const result=await ctx.command('claude',['agents','--json',...(allSupported?['--all']:[])],7000);
-      try{if(result.code!==0)throw new Error();cachedListing=parseClaudeListing(result.stdout);listingHealthy=true;}
-      catch{listingHealthy=false;cachedListing=[];diagnostics.push(diag(ctx,'claude-list-failed','Claude session listing is temporarily unavailable; runtime state is unconfirmed.','warning'));}
+      try{if(result.code!==0)throw new Error();cachedListing=parseClaudeListing(result.stdout);listingHealthy=true;lastListingObservedAt=ctx.now;listFailures=0;nextListingAt=now+3000;}
+      catch{listingHealthy=false;listFailures++;nextListingAt=now+Math.min(60000,3000*2**Math.min(5,listFailures-1));}
     }
+    if(supported&&!listingHealthy)diagnostics.push(diag(ctx,'claude-list-failed','Claude JSON listing is temporarily unavailable. Runtime verification will retry with bounded backoff; transcript collection continues independently.','warning'));
     if(!supported)diagnostics.push(diag(ctx,'claude-transcript-only','Claude is observed from transcripts. Recent file activity does not establish a live process.'));
     if(!cachedFiles.length || Date.parse(ctx.now)-lastFilesAt>=5000){cachedFiles=await discoverClaudeTranscripts(ctx,diagnostics);lastFilesAt=Date.parse(ctx.now);}
     const liveIds=new Set(cachedListing.map(row=>row.sessionId).filter(Boolean));
@@ -159,22 +166,23 @@ export function createClaudeAdapter():ProviderAdapter {
         if(result.errors)session.diagnostics.push(diag(ctx,'claude-json-errors',`${result.errors} malformed complete transcript records were skipped.`, 'warning'));
         transcriptCache.set(file.info.path,{session,complete:result.complete,size:currentInfo.size,mtimeMs:currentInfo.mtimeMs,identity:currentInfo.identity,processedAt:Date.parse(ctx.now)});
         processed++;
-      }catch{diagnostics.push(diag(ctx,'claude-transcript-read-failed','A transcript is locked, removed, or temporarily unreadable. It will be reconciled again.','warning'));}
+      }catch{failedFiles.add(file.info.path);const cached=transcriptCache.get(file.info.path);if(cached){const previous=cached.session.collection;cached.session.collection={lastCheckedAt:previous?.lastCheckedAt??new Date(lastFilesAt||now).toISOString(),ingestedAt:previous?.ingestedAt??null,evidenceAt:cached.session.lastActivityAt,condition:'unavailable',reason:'The latest transcript read failed. Last successful check, ingestion and native event timestamps are retained; runtime listing is a separate source.'};}diagnostics.push(diag(ctx,'claude-transcript-read-failed','A transcript is locked, removed, or temporarily unreadable. Last successful source timestamps are retained and collection will retry.','warning'));}
     }
     const present=new Set(files.map(file=>file.info.path));for(const path of transcriptCache.keys())if(!present.has(path)){transcriptCache.delete(path);tailCache.delete(path);}
     for(const file of files){
       if(excludedFiles.has(file.info.path))continue;
       const cached=transcriptCache.get(file.info.path);
       const session=cached?structuredClone(cached.session):emptySession('claude',ctx.namespace,file.nativeId,file.info.path,ctx.now);
-      if(!cached){session.parentId=file.parentNativeId?sessionKey('claude',ctx.namespace,file.parentNativeId):null;session.latestActivity='Waiting for historical backfill';session.diagnostics.push(diag(ctx,'claude-backfill-pending','Transcript discovered; historical metrics will be backfilled in a bounded batch.'));}
+      if(!cached){session.parentId=file.parentNativeId?sessionKey('claude',ctx.namespace,file.parentNativeId):null;session.latestActivity='Waiting for historical backfill';session.collection={lastCheckedAt:new Date(lastFilesAt||now).toISOString(),ingestedAt:null,evidenceAt:null,condition:failedFiles.has(file.info.path)?'unavailable':'backfilling',reason:failedFiles.has(file.info.path)?'The transcript was discovered but its latest read failed; no normalized source ingestion has succeeded yet.':'The transcript was discovered and is waiting for bounded historical backfill.'};session.diagnostics.push(diag(ctx,'claude-backfill-pending','Transcript discovered; historical metrics will be backfilled in a bounded batch.'));}
       const previous=sessions.get(session.id);if(!previous||(session.lastActivityAt??'')>(previous.lastActivityAt??''))sessions.set(session.id,session);
     }
     if(listingHealthy)for(const external of cachedListing){
       const nativeId=external.sessionId;if(!nativeId||isObserverWorkspace(external.cwd))continue;
       const id=sessionKey('claude',ctx.namespace,nativeId),session=sessions.get(id)??emptySession('claude',ctx.namespace,nativeId,'claude agents --json',ctx.now);
-      applyClaudeRuntime(session,external,ctx.now);
+      applyClaudeRuntime(session,external,lastListingObservedAt??ctx.now);
       sessions.set(id,session);
     }
+    if(!listingHealthy)for(const external of cachedListing){if(!external.sessionId||isObserverWorkspace(external.cwd))continue;const session=sessions.get(sessionKey('claude',ctx.namespace,external.sessionId));if(session&&external.name&&!/explicit/i.test(session.nameSource)){session.name=cleanText(external.name,4000)??session.name;session.nameSource='Last observed native name';}if(session)session.runtime.observedAt=lastListingObservedAt;}
     const pendingBackground=cachedListing.filter(external=>!external.sessionId&&external.id).length;
     if(pendingBackground)diagnostics.push(diag(ctx,'claude-background-conversation-pending',`${pendingBackground} background job${pendingBackground===1?' has':'s have'} not reported a native conversation ID yet. Conversations appear automatically when their identities are available.`));
     if(!supported || !listingHealthy){
@@ -193,8 +201,9 @@ export function createClaudeAdapter():ProviderAdapter {
         }catch{diagnostics.push(diag(ctx,'claude-registry-unreadable','A native session registry entry could not be validated.','info'));}
       }
     }
-    for(const session of sessions.values())if(!session.runtime.reachable){const reason=supported&&!listingHealthy?'Supported Claude JSON listing is temporarily unavailable; live session state cannot be verified.':!supported?'This installed Claude CLI does not expose verified JSON session listing; only transcript or validated registry evidence is available.':'Native listing did not report a live process for this conversation.';session.state.provenance.reason=`${session.state.provenance.reason??'Transcript evidence does not establish liveness.'} ${reason}`;if(session.collection)session.collection.reason=`${session.collection.reason}. ${reason}`;}
+    for(const session of sessions.values())if(!session.runtime.reachable){const reason=supported&&!listingHealthy?'Supported Claude JSON listing is temporarily unavailable; live session state cannot be verified.':!supported?capability==='unsupported'?'Successful native help does not advertise JSON session listing; transcript evidence is separate from runtime verification.':'Claude runtime capability detection has not succeeded yet and will retry; transcript collection remains independent.':'Native listing did not report a live process for this conversation.';session.state.provenance.reason=`${session.state.provenance.reason??'Transcript evidence does not establish liveness.'} ${reason}`;if(session.collection)session.collection.reason=`${session.collection.reason}. ${reason}`;}
     diagnostics.push(diag(ctx,'claude-capabilities',`${files.length} transcripts discovered; ${processed} incrementally refreshed this cycle. ${supported?'Supported JSON discovery enabled.':'Transcript discovery enabled.'} Subscription allowance is unavailable: ordinary session sources do not expose it.`));
+    diagnostics.push(diag(ctx,'claude-status-line-unavailable','No supported captured status-line JSON payload is available to this adapter. A configured command is not a payload; the dashboard does not execute status-line commands or rewrite agent settings.'));
     return{sessions:[...sessions.values()],allowances:[],diagnostics};
   }};
 }

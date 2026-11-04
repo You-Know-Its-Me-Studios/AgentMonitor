@@ -2,6 +2,7 @@ import type { ObserverAssessment, ObserverCapabilities, ObserverSessionState, Ob
 import type { Session } from '../shared/types.js';
 import { compareTimestampsNewestFirst, epochMilliseconds, validTimeZone } from '../shared/time.js';
 import { localFetch } from './http.js';
+import { sessionEligibility } from '../shared/lifecycle.js';
 
 export const assessmentIntervals = [30, 60, 120, 300, 600] as const;
 export function availableObserverEfforts(capability: ObserverCapabilities | undefined, model: string): string[] {
@@ -29,23 +30,24 @@ export function validateObserverForm(settings: Pick<ObserverSettings, 'timeoutSe
   return null;
 }
 export function hasRecentActiveEvidence(session: Session, now: number): boolean {
-  if (session.archived || session.parentId) return false;
-  if (session.runtime.reachable) return true;
-  if (!session.task || session.task.state !== 'active' || session.collection?.condition !== 'current') return false;
-  const occurrence = epochMilliseconds(session.task.lastActivityAt);
-  return occurrence !== null && occurrence <= now + 60000 && now - occurrence <= 30 * 60000;
+  return sessionEligibility(session, now).defaultVisible;
 }
 export function defaultSessions(sessions: Session[], now: number): Session[] {
-  return sessions.filter(session => hasRecentActiveEvidence(session, now)).sort((a, b) => Number(b.runtime.reachable) - Number(a.runtime.reachable) || compareTimestampsNewestFirst(a.lastActivityAt, b.lastActivityAt));
+  return sessions.filter(session => sessionEligibility(session, now).defaultVisible).sort((a, b) => Number(sessionEligibility(b, now).runtimeConfirmed) - Number(sessionEligibility(a, now).runtimeConfirmed) || compareTimestampsNewestFirst(a.lastActivityAt, b.lastActivityAt));
 }
 export function defaultSelection(sessions: Session[], now: number): string | null {
   const eligible = defaultSessions(sessions, now);
-  return eligible.find(session => session.runtime.reachable && session.state.value === 'running')?.id ?? eligible[0]?.id ?? null;
+  return eligible.find(session => sessionEligibility(session, now).runtimeConfirmed && session.state.value === 'running')?.id ?? eligible[0]?.id ?? null;
 }
 export function sessionTabs(sessions: Session[], selectedId: string | null, now: number): Session[] {
   const active = defaultSessions(sessions, now);
   const selected = sessions.find(session => session.id === selectedId && !session.parentId);
   return selected && !active.some(session => session.id === selected.id) ? [...active, selected] : active;
+}
+export interface SessionFilters { query: string; provider: 'all' | Session['provider']; showHistory: boolean }
+export function filteredSessionCollection(sessions: Session[], filters: SessionFilters, now: number): Session[] {
+  const query = filters.query.trim().toLowerCase();
+  return sessions.filter(session => !session.parentId && (filters.showHistory || sessionEligibility(session, now).defaultVisible) && (filters.provider === 'all' || session.provider === filters.provider) && `${session.name} ${session.nativeId} ${session.cwd ?? ''} ${session.project ?? ''} ${session.model.value ?? ''}`.toLowerCase().includes(query)).sort((a, b) => Number(sessionEligibility(b, now).runtimeConfirmed) - Number(sessionEligibility(a, now).runtimeConfirmed) || compareTimestampsNewestFirst(a.lastActivityAt, b.lastActivityAt) || a.id.localeCompare(b.id));
 }
 export function initialAssessmentStatus(session: Session, state: ObserverSessionState | undefined, enabled: boolean): string {
   if (state?.inProgress) return 'Assessing current task';
@@ -55,6 +57,8 @@ export function initialAssessmentStatus(session: Session, state: ObserverSession
   if (!session.task?.instructionsRecovered) return 'Task instructions unavailable';
   if (session.task.state === 'complete') return 'Reported task complete';
   if (session.task.state === 'paused') return 'Task paused';
+  const eligibility = sessionEligibility(session, Date.now());
+  if (!eligibility.assessmentSuitable) return eligibility.assessmentReason;
   return 'Initial assessment pending';
 }
 export function currentTaskSpan(session: Session, now: number): { milliseconds: number | null; startedAt: string | null; basis: string } {

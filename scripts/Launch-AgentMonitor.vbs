@@ -1,10 +1,11 @@
 Option Explicit
-Dim shell, fs, root, launchPath, command, index, argument
+Dim shell, fs, root, launchPath, powerShellPath, command, index, argument
 Set shell = CreateObject("WScript.Shell")
 Set fs = CreateObject("Scripting.FileSystemObject")
 root = fs.GetParentFolderName(fs.GetParentFolderName(WScript.ScriptFullName))
 launchPath = fs.BuildPath(root, "scripts\Launch-AgentMonitor.ps1")
-command = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File " & Chr(34) & launchPath & Chr(34)
+powerShellPath = shell.ExpandEnvironmentStrings("%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe")
+command = Chr(34) & powerShellPath & Chr(34) & " -NoLogo -NoProfile -ExecutionPolicy Bypass -File " & Chr(34) & launchPath & Chr(34)
 For index = 0 To WScript.Arguments.Count - 1
     argument = LCase(WScript.Arguments(index))
     If argument <> "-nobrowser" And argument <> "-noninteractive" Then
