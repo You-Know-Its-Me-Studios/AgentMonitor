@@ -8,7 +8,7 @@ import { defaultObserverSettings, type ObserverCapabilities, type ObserverInput,
 import { redact } from '../privacy.js';
 import { assessmentSchema } from './schema.js';
 import { createObserverProcessRunner, ObserverWorkerError, type ObserverProcessRunner } from './process.js';
-import { cachedCodexDefinitions, codexModelDefinitions, codexDelegationCatalog, claudeArguments, codexArguments, executableFor, modelCatalog, assessorInstructions, coordinatorInstructions, codexAssessorConfig, claudeAgents, etaQuestion, parseClaudeResult, parseCodexResult, safeProviderDiagnostic, type ProviderRuntime } from './worker-providers.js';
+import { cachedCodexDefinitions, codexModelDefinitions, codexDelegationCatalog, claudeArguments, codexArguments, executableFor, modelCatalog, workerBaseInstructions, codexAssessorConfig, claudeAgents, etaQuestion, parseClaudeResult, parseCodexResult, safeProviderDiagnostic, observerProgressDiagnostic, type ProviderRuntime } from './worker-providers.js';
 export { ObserverWorkerError } from './process.js';
 
 export interface ObserverWorkerOptions { runner?: ObserverProcessRunner; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform }
@@ -29,10 +29,9 @@ export function createObserverWorker(workspace: string, options: ObserverWorkerO
   const runtimes = new Map<Provider,ProviderRuntime>(); let cached: ObserverCapabilities[] | null = null;let closed = false; let discovery: Promise<ObserverCapabilities[]> | null = null;
   const retryAt=new Map<Provider,number>(),probeFailures=new Map<Provider,number>(),confirmedUnsupported=new Set<Provider>();
   const prepare = async () => { await fs.mkdir(cwd,{recursive:true,mode:0o700}); };
-  async function prepareCodexInstructions(directory: string, runtime: ProviderRuntime, model: string) {
-    await fs.writeFile(path.join(directory,'observer-instructions.md'),coordinatorInstructions,{mode:0o600,flag:'wx'});
-    await fs.writeFile(path.join(directory,'assessor-instructions.md'),assessorInstructions,{mode:0o600,flag:'wx'});
-    await fs.writeFile(path.join(directory,'eta-assessor.toml'),codexAssessorConfig(directory),{mode:0o600,flag:'wx'});
+  async function prepareCodexInstructions(directory: string, runtime: ProviderRuntime, model: string, evidence = '') {
+    await fs.writeFile(path.join(directory,'observer-instructions.md'),workerBaseInstructions,{mode:0o600,flag:'wx'});
+    await fs.writeFile(path.join(directory,'eta-assessor.toml'),codexAssessorConfig(evidence),{mode:0o600,flag:'wx'});
     await fs.writeFile(path.join(directory,'delegation-models.json'),JSON.stringify(codexDelegationCatalog(runtime,model)),{mode:0o600,flag:'wx'});
   }
   async function probe(provider: Provider): Promise<ObserverCapabilities> {
@@ -120,23 +119,33 @@ export function createObserverWorker(workspace: string, options: ObserverWorkerO
       if (!Number.isFinite(settings.timeoutSeconds) || settings.timeoutSeconds < 10 || settings.timeoutSeconds > 600) throw new ObserverWorkerError('unavailable','Observer timeout must be between 10 and 600 seconds.');
       // task.items is the same selected evidence array. Send it once, with the complete objective retained.
       const data = redact(JSON.stringify({...input,task:{...input.task,items:undefined}})); if (Buffer.byteLength(data,'utf8') > 512 * 1024) throw new ObserverWorkerError('evidence-unavailable','Task evidence exceeds the bounded observer input limit.');
-      const prompt = `Ask exactly one CLI subagent named eta_assessor (Claude: eta-assessor) the question "${etaQuestion}". Pass it this entire evidence block unchanged. Wait for its completed answer and return its assessment JSON verbatim. Do not estimate the time yourself.
-<OBSERVER_EVIDENCE>
-${data}
-</OBSERVER_EVIDENCE>`;
+      // The child receives the complete packet through its app-owned role configuration.
+      // Asking the coordinator to regenerate thousands of evidence tokens in a tool
+      // argument adds a serial generation step before the assessor can even start.
+      const evidence = `<OBSERVER_EVIDENCE>\n${data}\n</OBSERVER_EVIDENCE>`;
+      const prompt = `Ask exactly one CLI subagent of type eta_assessor (Claude: eta-assessor): "${etaQuestion}? Use the OBSERVER_EVIDENCE already supplied in your instructions." Do not fork context. Wait for its completed answer and return its assessment JSON verbatim. Do not estimate the time yourself or copy evidence into the tool call.`;
       const directory = await fs.mkdtemp(path.join(cwd,'run-')); const schemaPath = path.join(directory,'assessment.schema.json'), outputPath = path.join(directory,'assessment.json');
       try {
         await fs.writeFile(schemaPath,JSON.stringify(assessmentSchema),{mode:0o600,flag:'wx'});
         // Replace the coding-agent base instructions for this isolated assessment
         // only; never edit the user's CLI configuration or monitored conversation.
-        if (settings.provider === 'codex') await prepareCodexInstructions(directory,runtime,model);
-        else await fs.writeFile(path.join(directory,'agents.json'),JSON.stringify(claudeAgents(settings,model)),{mode:0o600,flag:'wx'});
+        if (settings.provider === 'codex') await prepareCodexInstructions(directory,runtime,model,evidence);
+        else await fs.writeFile(path.join(directory,'agents.json'),JSON.stringify(claudeAgents(settings,model,evidence)),{mode:0o600,flag:'wx'});
         const args = settings.provider === 'codex' ? codexArguments(runtime,settings,model,schemaPath,outputPath,directory) : claudeArguments(runtime,settings,model,assessmentSchema,directory);
         const result = await runner.run({executable:runtime.executable,args,cwd:directory,env,input:prompt,timeoutMs:settings.timeoutSeconds*1000,signal,maxOutputBytes:4*1024*1024});
         const evidenceIds = input.evidence.map(e => e.id); let final: string | null = null;
         if (settings.provider === 'codex') { const stat = await fs.stat(outputPath).catch(() => null); if (stat && stat.size > 128*1024) throw new ObserverWorkerError('invalid-output','Codex final assessment exceeded its size limit.'); if (stat) final = await fs.readFile(outputPath,'utf8'); }
         const parsed = settings.provider === 'codex' ? parseCodexResult(result,final,evidenceIds,model) : parseClaudeResult(result,evidenceIds,model);
         return {...parsed,durationMs:result.durationMs};
+      } catch (error) {
+        if (error instanceof ObserverWorkerError && error.partialResult) {
+          const diagnostic = observerProgressDiagnostic(settings.provider,error.partialResult);
+          const detailed = new ObserverWorkerError(error.code,`${error.message} ${diagnostic}`);
+          detailed.usage = error.usage;
+          detailed.stack += `\nCaused by: ${error.stack ?? error.message}`;
+          throw detailed;
+        }
+        throw error;
       } finally { await fs.rm(directory,{recursive:true,force:true}); }
     },
     async close() { closed = true; await runner.close();if(discovery)await discovery.catch(()=>undefined); }

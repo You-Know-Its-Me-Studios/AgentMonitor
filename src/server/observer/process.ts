@@ -8,6 +8,9 @@ import { logError } from '../errors.js';
 
 export class ObserverWorkerError extends Error {
   usage: Usage | null = null;
+  // Bounded, in-memory capture for provider-specific diagnostics. Never serialize
+  // this object or log raw output: it can contain task evidence and child replies.
+  partialResult?: ObserverProcessResult;
   constructor(readonly code: ObserverFailure['code'], message: string) { super(message); this.name = 'ObserverWorkerError'; }
 }
 export interface ObserverCommand { executable: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; input: string; timeoutMs: number; signal?: AbortSignal; maxOutputBytes?: number; fileStdio?: boolean }
@@ -61,11 +64,12 @@ export function createObserverProcessRunner(): ObserverProcessRunner {
         child.on('error',error => { if (done) return; cleanup(); reject(error); });
         child.on('close',async code => {
           if (done) return; cleanup();
-          if (failure) { reject(failure); return; }
           try {
             let stdout = Buffer.concat(out).toString('utf8'), stderr = Buffer.concat(err).toString('utf8');
             if (files && directory) { const o = path.join(directory,'stdout'), e = path.join(directory,'stderr'); const [os,es] = await Promise.all([fs.stat(o),fs.stat(e)]); if (os.size > max || es.size > errMax) throw new ObserverWorkerError('invalid-output','Observer CLI output exceeded the bounded response limit.'); [stdout,stderr] = await Promise.all([fs.readFile(o,'utf8'),fs.readFile(e,'utf8')]); }
-            resolve({stdout,stderr,code,durationMs:Date.now()-started});
+            const result = {stdout,stderr,code,durationMs:Date.now()-started};
+            if (failure) { failure.partialResult = result; reject(failure); return; }
+            resolve(result);
           } catch (error) { reject(error); }
         });
         if (!files) child.stdin?.end(command.input,'utf8');
