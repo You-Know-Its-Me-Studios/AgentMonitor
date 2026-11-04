@@ -322,6 +322,10 @@ footer > span { display: flex; align-items: center; gap: 6px; }
 .usage-scope-totals strong { color: #c2aedf; font-size: 12px; font-weight: 550; }
 .pricing-coverage { border-top: 1px solid var(--border); padding-top: 8px; }
 .observer-controls { padding-bottom: 13px; border-bottom: 1px solid var(--border); }
+.observer-explanation { margin: 0 0 12px; color: #98b0c7; font-size: 11px; line-height: 1.6; }
+.observer-session { margin: 0 0 15px; color: #b8c9db; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.observer-session strong, .observer-session span { display: block; }
+.observer-session strong { color: #859db6; font-size: 9px; font-weight: 500; }
 .observer-control-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 10px; color: #b8c9db; margin-bottom: 12px; }
 .observer-switch { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #476078; border-radius: 6px; background: #1b2a3c; padding: 4px 7px; font-size: 9px; color: #95aabe; }
 .observer-switch > span { width: 6px; height: 6px; border-radius: 50%; background: #62758e; }
