@@ -16,6 +16,7 @@ export interface ClaudeState {
   checklistTiming: { ids: string[]; started: Record<string,string>; durations: Record<string,number> };
   tailObservedAt: string | null; nativeCost: { usd: number; modelNames: string[]; unknown: boolean } | null;
   taskEvidence?:TaskEvidenceState;
+  contextClearedAt?:string;
 }
 
 export function cleanText(value: unknown, length = 160): string | null {
@@ -100,7 +101,7 @@ export function reduceClaudeRecord(state: ClaudeState, record: any,meta?:RecordM
   }
   if (record.type === 'system') {
     if (record.subtype === 'turn_duration' && number(record.durationMs) !== null && state.currentTurn) state.turns[state.currentTurn].durationMs = record.durationMs;
-    if (record.subtype === 'compact_boundary' && at) addActivity(state,{id: record.uuid ?? `compact:${at}`,at,kind:'compaction',label:'Context compacted'},meta,record.timestamp);
+    if (record.subtype === 'compact_boundary' && at) {state.contextClearedAt=state.contextClearedAt && state.contextClearedAt>at?state.contextClearedAt:at;addActivity(state,{id: record.uuid ?? `compact:${at}`,at,kind:'compaction',label:'Context compacted'},meta,record.timestamp);}
     if(['turn_aborted','interrupted'].includes(record.subtype))for(const tool of Object.values(state.tools))if(!tool.resultAt)tool.phase='interrupted';
     return;
   }
@@ -193,8 +194,13 @@ export function claudeSession(state: ClaudeState, namespace: string, now: string
   for(const response of responses){const key=`${response.model??''}:${response.serviceTier??''}`,old=slices.get(key);const aggregate=(a:number|null|undefined,b:number|null|undefined)=>a!==null&&a!==undefined&&b!==null&&b!==undefined?a+b:null;slices.set(key,{model:response.model,serviceTier:response.serviceTier??null,usage:old?sumClaudeUsage([{...response,usage:old.usage},response]):response.usage,cacheCreation5m:old?aggregate(old.cacheCreation5m,response.cacheCreation5m):response.cacheCreation5m??null,cacheCreation1h:old?aggregate(old.cacheCreation1h,response.cacheCreation1h):response.cacheCreation1h??null});}session.usageBreakdown=[...slices.values()];
   session.task=taskEvidence(state.taskEvidence,complete?'Public task evidence recovered from the native transcript.':'Observed prefix and recent public task evidence; historical backfill is incomplete.');session.agentRole=state.parentNativeId?'implementation':'unknown';
   // Request tokens are useful evidence but are not an authoritative current-context gauge.
-  const last=responses.at(-1);
-  if(last && last.usage.input!==null) session.context.used=metric(last.usage.input+(last.usage.cachedInput??0)+(last.usage.cacheCreation??0),state.source,'latest API request input','estimated','Latest request input including cache; context may have changed since',last.at);
+  const last=Object.entries(state.responses).sort(([idA,a],[idB,b])=>a.at.localeCompare(b.at)||idA.localeCompare(idB)).at(-1)?.[1];
+  const clearedAt=state.contextClearedAt??state.activities.filter(activity=>activity.kind==='compaction').map(activity=>activity.at).sort().at(-1);
+  if(last && last.usage.input!==null && (!clearedAt || last.at>clearedAt)) {
+    session.context.used=metric(last.usage.input+(last.usage.cachedInput??0)+(last.usage.cacheCreation??0),state.source,'latest API request input','derived','Latest reported input plus cache read and cache creation; excludes output and lifetime consumption. Pending work may change context.',last.at);
+    // Keep the denominator tied to the response model, including after out-of-order historical backfill.
+    if(last.model)session.model=metric(last.model,state.source,'latest response model','reported',undefined,last.at);
+  }else if(clearedAt)session.context.used=metric<number>(null,state.source,'latest API request input','unavailable','Context was compacted; waiting for the next reported API usage.',clearedAt);
   session.activities=state.activities.slice().reverse();session.latestActivity=session.activities[0]?.label??'Persisted session';
   const tools=new Map<string,ToolSummary>();
   for(const tool of Object.values(state.tools)) {

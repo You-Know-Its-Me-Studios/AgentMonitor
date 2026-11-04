@@ -92,12 +92,14 @@ function Empty({ icon = 'info', title, detail, compact: small = false }: { icon?
 function ContextCard({ session }: { session: Session }) {
   const { provenance } = useTimes();
   const { used, capacity } = session.context;
+  const modelLimit = session.context.capacityBasis === 'model-limit';
+  const stale = used.provenance.quality === 'stale' || capacity.provenance.quality === 'stale';
   const percent = isKnown(used.value) && used.value >= 0 && isKnown(capacity.value) && capacity.value > 0 && used.value <= capacity.value ? used.value / capacity.value * 100 : null;
   const unavailableReason = !isKnown(used.value) || used.value < 0 ? used.provenance.reason || 'Context occupancy is not reported.' : !isKnown(capacity.value) || capacity.value <= 0 ? capacity.provenance.reason || 'A positive context capacity has not been reported.' : 'Reported context occupancy exceeds the reported capacity.';
   return <Card title="Context window" icon="context" className="context-card" hint={`${provenance(used)}\n${provenance(capacity)}`}>
-    <div className="context-overview"><Gauge percent={percent} value={percent === null ? '—' : `${Math.round(percent)}%`} label="context used" color={percent !== null && percent > 85 ? 'amber' : 'green'} title={percent === null ? unavailableReason : provenance(used)} stale={used.provenance.quality === 'stale'} unavailableLabel="Context unavailable" unavailableReason="No valid context snapshot" />
-      <dl className="context-numbers"><div><dt>Used</dt><dd>{short(used.value)}</dd></div><div><dt>Remaining</dt><dd className="text-green">{percent === null ? '—' : short(capacity.value! - used.value!)}</dd></div><div><dt>Capacity</dt><dd>{short(capacity.value)}</dd></div></dl>
-    </div>{used.provenance.quality === 'stale' && <p className="card-footnote text-amber">Last reported snapshot · stale</p>}
+    <div className="context-overview"><Gauge percent={percent} value={percent === null ? '—' : `${Math.round(percent)}%`} label={modelLimit ? 'of model limit' : 'context used'} color={percent !== null && percent > 85 ? 'amber' : 'green'} title={percent === null ? unavailableReason : `${provenance(used)}\n${provenance(capacity)}`} stale={stale} unavailableLabel={used.value !== null && capacity.value === null ? 'Limit unavailable' : 'Context unavailable'} unavailableReason={unavailableReason} />
+      <dl className="context-numbers"><div><dt>{modelLimit ? 'Latest input' : 'Used'}</dt><dd title={provenance(used)}>{short(used.value)}</dd></div><div><dt>{modelLimit ? 'To model limit' : 'Remaining'}</dt><dd className="text-green">{percent === null ? '—' : short(capacity.value! - used.value!)}</dd></div><div><dt>{modelLimit ? 'Model limit' : 'Capacity'}</dt><dd title={provenance(capacity)}>{short(capacity.value)}</dd></div></dl>
+    </div>{modelLimit ? <p className="card-footnote" title={`${provenance(used)}\n${provenance(capacity)}`}>Latest request · {capacity.provenance.quality === 'stale' ? 'cached model limit' : 'native model limit'} · compaction may occur sooner</p> : stale && <p className="card-footnote text-amber">Last reported snapshot · stale</p>}
   </Card>;
 }
 

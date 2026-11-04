@@ -2,6 +2,7 @@ import type { AdapterContext, AdapterResult, FileInfo, ProviderAdapter } from '.
 import { emptySession, metric, sessionKey, type Diagnostic, type Session } from '../../shared/types.js';
 import { claudeSession, cleanText, initialClaudeState, iso, reduceClaudeRecord, type ClaudeState } from './parser.js';
 import { isObserverWorkspace, mergeTaskEvidence } from '../../server/task-evidence.js';
+import { applyClaudeModelLimit, readClaudeModelLimits } from './context.js';
 
 interface ExternalSession { sessionId?: string; id?: string; cwd?: string; kind?: string; startedAt?: number; pid?: number; status?: string; waitingFor?: string; state?: string; name?: string }
 interface TranscriptFile { info: FileInfo; nativeId: string; parentNativeId: string | null }
@@ -108,6 +109,7 @@ function mergeObservedTail(prefix:ClaudeState,tail:ClaudeState):ClaudeState {
   if(tail.tailObservedAt && tail.currentTurn===null)merged.currentTurn=null;
   merged.startedAt=prefix.startedAt&&tail.startedAt?(prefix.startedAt<tail.startedAt?prefix.startedAt:tail.startedAt):prefix.startedAt??tail.startedAt;
   merged.firstPrompt??=tail.firstPrompt;merged.forkedFrom??=tail.forkedFrom;
+  merged.contextClearedAt=[prefix.contextClearedAt,tail.contextClearedAt].filter((at):at is string=>Boolean(at)).sort().at(-1);
   for(const [id,response]of Object.entries(tail.responses))if(!merged.responses[id]||response.final||!merged.responses[id].final)merged.responses[id]=response;
   for(const[id,tool]of Object.entries(tail.tools)){const previous=merged.tools[id];merged.tools[id]=previous?.resultAt && (!tool.resultAt||previous.resultAt>=tool.resultAt)?previous:tool;}
   for(const[id,turn]of Object.entries(tail.turns))merged.turns[id]=merged.turns[id]?.durationMs!==null&&merged.turns[id]?.durationMs!==undefined?merged.turns[id]:turn;
@@ -119,6 +121,7 @@ function mergeObservedTail(prefix:ClaudeState,tail:ClaudeState):ClaudeState {
 }
 
 export function createClaudeAdapter():ProviderAdapter {
+  let modelLimits:Awaited<ReturnType<typeof readClaudeModelLimits>>=[],nextCatalogAt=0;
   let supported=false,allSupported=false,capability:'pending'|'supported'|'unsupported'|'retrying'='pending',helpFailures=0,nextHelpAt=0;
   let nextListingAt=0,listFailures=0,lastListingObservedAt:string|null=null,cachedListing:ExternalSession[]=[],listingHealthy=false;
   let lastFilesAt=0,cachedFiles:TranscriptFile[]=[];
@@ -129,6 +132,10 @@ export function createClaudeAdapter():ProviderAdapter {
     const diagnostics:Diagnostic[]=[];
     const failedFiles=new Set<string>();
     const now=Date.parse(ctx.now);
+    if(now>=nextCatalogAt){
+      nextCatalogAt=now+60000;
+      try{modelLimits=await readClaudeModelLimits(ctx);}catch{diagnostics.push(diag(ctx,'claude-model-catalog-unreadable','Claude’s local model catalog is temporarily unreadable; context-limit discovery will retry.'));}
+    }
     if(now>=nextHelpAt){
       const help=await ctx.command('claude',['agents','--help'],6000);
       if(help.code===0&&(/--json\b/.test(help.stdout)||/\b(?:Usage|Options):/i.test(help.stdout))){const previouslySupported=supported;supported=/--json\b/.test(help.stdout);allSupported=supported&&/--all\b/.test(help.stdout);capability=supported?'supported':'unsupported';if(!supported)listingHealthy=false;else if(!previouslySupported)nextListingAt=0;helpFailures=0;nextHelpAt=now+5*60000;}
@@ -206,6 +213,7 @@ export function createClaudeAdapter():ProviderAdapter {
       }
     }
     for(const session of sessions.values())if(!session.runtime.reachable){const reason=supported&&!listingHealthy?'Supported Claude JSON listing is temporarily unavailable; live session state cannot be verified.':!supported?capability==='unsupported'?'Successful native help does not advertise JSON session listing; transcript evidence is separate from runtime verification.':'Claude runtime capability detection has not succeeded yet and will retry; transcript collection remains independent.':'Native listing did not report a live process for this conversation.';session.state.provenance.reason=`${session.state.provenance.reason??'Transcript evidence does not establish liveness.'} ${reason}`;if(session.collection)session.collection.reason=`${session.collection.reason}. ${reason}`;}
+    for(const session of sessions.values())applyClaudeModelLimit(session,modelLimits,ctx.now);
     diagnostics.push(diag(ctx,'claude-capabilities',`${files.length} transcripts discovered; ${processed} incrementally refreshed this cycle. ${supported?'Supported JSON discovery enabled.':'Transcript discovery enabled.'} Subscription allowance is unavailable: ordinary session sources do not expose it.`));
     diagnostics.push(diag(ctx,'claude-status-line-unavailable','No supported captured status-line JSON payload is available to this adapter. A configured command is not a payload; the dashboard does not execute status-line commands or rewrite agent settings.'));
     return{sessions:[...sessions.values()],allowances:[],diagnostics};

@@ -22,7 +22,7 @@ export interface Session {
   runtime: { reachable: boolean; loaded: boolean; serverReachable?: boolean; openTurn?: boolean; attachment: 'known' | 'unknown'; pid: number | null; processStartedAt: string | null; observedAt: string | null };
   state: Metric<'running' | 'idle' | 'approval' | 'input' | 'complete' | 'historical' | 'unknown'>;
   latestActivity: string; usage: Metric<Usage>; turnUsage: Metric<Usage>;
-  context: { used: Metric<number>; capacity: Metric<number> };
+  context: { used: Metric<number>; capacity: Metric<number>; capacityBasis?: 'model-limit' };
   allowanceIds: string[]; tools: ToolSummary[]; activities: Activity[]; trends: TrendPoint[];
   timing: Timing; edits: Metric<{ files: number; additions: number | null; deletions: number | null }>;
   cost: Metric<{ usd: number; label: string }>;
