@@ -17,6 +17,7 @@ export interface CodexState {
   taskEvidence?:TaskEvidenceState; historyStartOrdinal?:number|null; agentRole?:Session['agentRole']; observer?:boolean;
   serviceTier?:string|null;
   modelAt?:string|null;effortAt?:string|null;cwdAt?:string|null;branchAt?:string|null;
+  agentError?:{at:string;message:string|null};
 }
 export const number = (v: unknown): number | null => typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
 export const string = (v: unknown): string | null => typeof v === 'string' && v.length ? v : null;
@@ -54,9 +55,10 @@ export function completedItem(s: CodexState, item: any, at: string, timing?: any
   const interrupted=['cancelled','canceled','interrupted','aborted'].includes(status);
   const outcome: Tool['outcome'] = ['failed','error','declined'].includes(status) || (typeof (item.exitCode ?? item.exit_code) === 'number' && exit !== 0) ? 'failure' : ['completed','success','succeeded'].includes(status) ? 'success' : prior?.outcome ?? 'unknown';
   const started = number(timing?.started_at_ms ?? item.startedAtMs); const ended = number(timing?.completed_at_ms ?? item.completedAtMs);
-  const tool: Tool = { name: type === 'mcptoolcall' ? `${string(item.server) ?? 'MCP'} / ${string(item.tool) ?? 'tool'}` : type==='subagentactivity'?`Subagent ${string(item.kind)??'activity'}`:toolNames[type], at:prior?.at??iso(started)??at,endedAt:['completed','success','succeeded','failed','error','declined'].includes(status)?at:null,phase:interrupted?'interrupted':['inprogress','running'].includes(status)?'in-flight':['completed','success','succeeded','failed','error','declined'].includes(status)?'finished':prior?.phase??'pending', outcome, origin: 'typed', turn: timing?.turn_id ?? s.currentTurn, durationMs: duration(item) ?? (started !== null && ended !== null ? Math.max(0, ended - started) : prior?.durationMs ?? null) };
+  const tool: Tool = { name: type === 'mcptoolcall' ? `${string(item.server) ?? 'MCP'} / ${string(item.tool) ?? 'tool'}` : type==='subagentactivity'?`Subagent ${string(item.kind)??'activity'}`:type==='dynamictoolcall'?prior?.name??string(item.tool)??toolNames[type]:toolNames[type], at:prior?.at??iso(started)??at,endedAt:['completed','success','succeeded','failed','error','declined'].includes(status)?at:null,phase:interrupted?'interrupted':['inprogress','running'].includes(status)?'in-flight':['completed','success','succeeded','failed','error','declined'].includes(status)?'finished':prior?.phase??'pending', outcome, origin: 'typed', turn: timing?.turn_id ?? s.currentTurn, durationMs: duration(item) ?? (started !== null && ended !== null ? Math.max(0, ended - started) : prior?.durationMs ?? null) };
   if (type === 'filechange') { const changes = item.changes; const entries: any[] = Array.isArray(changes) ? changes : changes && typeof changes === 'object' ? Object.values(changes) : []; let additions = 0, deletions = 0; for (const e of entries) { const d = diffCount(e.diff ?? e.unified_diff ?? e.content); additions += d.additions; deletions += d.deletions; } tool.edits = { files: entries.length, additions, deletions }; }
   s.tools[id] = tool; activity(s, `tool:${id}`, at, type === 'filechange' ? 'edit' : 'tool', tool.name, outcome,meta,timing?.completed_at_ms??at);
+  if(!s.agentError||at>=s.agentError.at)s.agentError={at,message:outcome==='failure'?`${tool.name} failed`:null};
   const description=type==='commandexecution'?`${tool.name}: ${evidenceText(item.command,700)}; ${status||'outcome not reported'}${exit!==null?`; exit ${exit}`:''}${tool.durationMs!==null?`; ${(tool.durationMs/1000).toFixed(2)}s`:''}`:type==='subagentactivity'?`${tool.name}; native child ${string(item.agent_thread_id)??'unreported'}; path ${string(item.agent_path)??'unreported'}`:`${tool.name}: ${status||'outcome not reported'}`;
   signal(s,type==='subagentactivity'?'subagent':'tool',description,at,id,meta,tool.phase,timing?.completed_at_ms??at);
   const summary=outputEvidence(item.aggregated_output??item.stdout??item.result);if(summary)signal(s,outcome==='failure'?'blocker':'result',summary,at,`${id}:result`,meta,outcome,timing?.completed_at_ms??at);
@@ -93,6 +95,12 @@ export function reduceCodex(s: CodexState, record: any, meta?: RecordMeta&{inges
   }
   if (type === 'event_msg') {
     const e = p.type;
+    if(e==='error'||e==='stream_error'){
+      if(!s.agentError||at>=s.agentError.at)s.agentError={at,message:evidenceText(p.message,240)||'Codex reported an error'};
+      activity(s,`error:${record.ordinal??at}`,at,'status','Agent error','failure',meta,eventTime);
+      return;
+    }
+    if(['task_started','turn_started','agent_message','exec_command_begin'].includes(e)&&(!s.agentError||at>s.agentError.at))s.agentError={at,message:null};
     if (e === 'token_count') { s.legacyTotal = usage(p.info?.total_token_usage) ?? s.legacyTotal; s.lastUsage = usage(p.info?.last_token_usage) ?? s.lastUsage; s.usageAt = at; const capacity = number(p.info?.model_context_window); if (capacity !== null) { s.capacity = capacity; s.capacityAt = at; } if (p.rate_limits) s.quota = { value: p.rate_limits, at }; return; }
     if (e === 'item_completed'||e==='item_started') { completedItem(s, p.item, at, p,meta); return; }
     if(e==='thread_settings_applied'){const settings=p.thread_settings??{};s.model=string(settings.model)??s.model;s.effort=string(settings.reasoning_effort??settings.reasoningEffort??settings.effort)??s.effort;s.cwd=string(settings.cwd)??s.cwd;s.serviceTier=string(settings.service_tier??settings.serviceTier)??s.serviceTier;if(string(settings.cwd))s.cwdAt=at;if(string(settings.model))s.modelAt=at;if(string(settings.reasoning_effort??settings.reasoningEffort??settings.effort))s.effortAt=at;return;}
@@ -106,6 +114,7 @@ export function reduceCodex(s: CodexState, record: any, meta?: RecordMeta&{inges
   }
   if (type === 'response_item') {
     const id = identity(p.call_id ?? p.id); const t = p.type;
+    if((t==='message'&&p.role==='assistant'||['function_call','custom_tool_call','local_shell_call'].includes(t))&&(!s.agentError||at>s.agentError.at))s.agentError={at,message:null};
     if(t==='message'){const text=contentText(p.content);if(p.role==='user')signal(s,'request',text,at,id??`user:${record.ordinal??at}`,meta,'user-input',eventTime);else if(p.role==='assistant')signal(s,p.phase==='final_answer'?'summary':'progress',text,at,id??`message:${record.ordinal??at}`,meta,p.phase??'public-update',eventTime);return;}
     if(t==='agent_message'){signal(s,'subagent',contentText(p.content),at,id??`subagent:${record.ordinal??at}`,meta,'public-subagent-message',eventTime);return;}
     if(t==='compaction'){s.lastUsage=null;activity(s,`compact:${id??record.ordinal??at}`,at,'compaction','Context compacted',undefined,meta,eventTime);return;}
@@ -123,6 +132,7 @@ export function reduceCodex(s: CodexState, record: any, meta?: RecordMeta&{inges
     if (['function_call_output','custom_tool_call_output'].includes(t) && id) {
       let result: any = p.output; if (typeof result === 'string' && result.startsWith('{')) { try { result = JSON.parse(result); } catch { result = null; } }
       const exit = typeof result?.exit_code === 'number' ? result.exit_code : typeof result?.exitCode === 'number' ? result.exitCode : null;
+      if(s.tools[id]&&exit!==null&&(!s.agentError||at>=s.agentError.at))s.agentError={at,message:exit===0?null:`${s.tools[id].name} failed (exit ${exit})`};
       const tool = s.tools[id]; if (tool){if(tool.outcome==='unknown'&&exit!==null)tool.outcome=exit===0?'success':'failure';tool.endedAt=at;tool.phase='finished';const elapsed=Date.parse(at)-Date.parse(tool.at);if(tool.durationMs===null&&elapsed>0)tool.durationMs=elapsed;activity(s,`tool:${id}`,at,'tool',tool.name,tool.outcome,meta,eventTime);const summary=outputEvidence(typeof result==='object'?result?.output??result?.stdout??result?.stderr:p.output);signal(s,tool.outcome==='failure'?'blocker':'result',summary||`${tool.name} returned; ${tool.outcome==='unknown'?'outcome unavailable':tool.outcome}`,at,`${id}:result`,meta,tool.outcome,eventTime);}return;
     }
     return;
@@ -145,6 +155,7 @@ export function quotaFromSnapshot(value: any, namespace: string, source: string,
 }
 export function sessionFromState(s: CodexState, namespace: string, source: string, now: string): Session {
   const out = emptySession('codex', namespace, s.nativeId, source, now); const observedAt = s.lastAt ?? s.startedAt ?? now;
+  if(s.agentError?.message)out.agentError=metric(s.agentError.message,source,'native agent error','reported',undefined,s.agentError.at);
   out.startedAt = s.startedAt; out.lastActivityAt = s.lastAt; out.cwd = s.cwd; out.project = s.cwd?.replace(/\\/g,'/').replace(/\/$/,'').split('/').pop() ?? null; out.branch = s.branch;
   if (s.lastAt && Date.parse(now) - Date.parse(s.lastAt) < 15 * 60_000) out.state = metric('unknown',source,'runtime','derived','Recently active transcript; runtime and attachment are unconfirmed',observedAt);
   if (s.title) { out.name = s.title; out.nameSource = 'native title metadata'; }
@@ -171,7 +182,7 @@ export function sessionFromState(s: CodexState, namespace: string, source: strin
   // Paginated history persists concrete tool items in addition to presentation-level raw calls.
   // Count its native typed invocations once; raw calls are a fallback for legacy-only turns.
   const countedTools = allTools.filter(t => !t.wrapper || !typedTurns.has(t.turn));
-  for (const t of countedTools) { let g = grouped.get(t.name); if (!g) { g = { name: t.name, category: /shell|exec|command/i.test(t.name) ? 'execution' : /file|patch|edit/i.test(t.name) ? 'edits' : /agent|spawn/i.test(t.name) ? 'agents' : 'tools', calls: 0, succeeded: 0, failed: 0, unknown: 0, durationMs: null, retries: null }; grouped.set(t.name, g); } g.calls++; if (t.outcome === 'success') g.succeeded++; else if (t.outcome === 'failure') g.failed++; else g.unknown++; if(t.phase==='in-flight')g.inFlight=(g.inFlight??0)+1;if(t.phase==='interrupted')g.interrupted=(g.interrupted??0)+1;if (t.durationMs !== null) g.durationMs = (g.durationMs ?? 0) + t.durationMs; }
+  for (const t of countedTools) { let g = grouped.get(t.name); if (!g) { g = { name: t.name, category: /shell|exec|command/i.test(t.name) ? 'execution' : /file|patch|edit/i.test(t.name) ? 'edits' : /agent|spawn/i.test(t.name) ? 'agents' : 'tools', calls: 0, succeeded: 0, failed: 0, unknown: 0, durationMs: null, retries: null }; grouped.set(t.name, g); } g.calls++; if (t.outcome === 'success') g.succeeded++; else if (t.outcome === 'failure') g.failed++; else g.unknown++; if(t.phase==='pending'&&t.turn===s.currentTurn&&s.lastTask==='started')g.pending=(g.pending??0)+1;if(t.phase==='in-flight'&&t.turn===s.currentTurn)g.inFlight=(g.inFlight??0)+1;if(t.phase==='interrupted')g.interrupted=(g.interrupted??0)+1;if (t.durationMs !== null) g.durationMs = (g.durationMs ?? 0) + t.durationMs; }
   out.tools = [...grouped.values()].sort((a,b) => b.calls - a.calls);
   const edits = Object.values(s.tools).flatMap(x => x.edits ? [x.edits] : []); if (edits.length) out.edits = metric({ files: edits.reduce((a,b) => a + b.files,0), additions: edits.reduce((a,b) => a + b.additions,0), deletions: edits.reduce((a,b) => a + b.deletions,0) }, source, 'session', 'derived', 'Observed file edit operations, not the shared workspace Git diff', observedAt);
   const trendResponses = modern.filter(x => x.usage.input !== null && x.usage.output !== null).slice(-120);

@@ -24,6 +24,7 @@ export function mergeCodexObservations(prefix:CodexState,tail:CodexState):CodexS
   for(const key of ['cwd','model','effort','branch'] as const){const atKey=`${key}At` as 'cwdAt'|'modelAt'|'effortAt'|'branchAt';if(tail[key]!==null&&(tail[atKey]??'')>=(prefix[atKey]??'')){out[key]=tail[key];out[atKey]=tail[atKey];}}
   for(const key of ['currentTurn','lastTask'] as const)if(tailNewer&&tail[key]!==null)out[key]=tail[key];
   out.lastAt=(tail.lastAt??'')>(prefix.lastAt??'')?tail.lastAt:prefix.lastAt;
+  if(tail.agentError&&(!prefix.agentError||tail.agentError.at>=prefix.agentError.at))out.agentError=tail.agentError;
   for(const[id,response]of Object.entries(tail.responses)){const old=out.responses[id];if(!old||response.at>=old.at)out.responses[id]=response;}
   if((tail.usageAt??'')>=(prefix.usageAt??'')){for(const key of ['modernTotal','legacyTotal','lastUsage','turnUsage','turnUsageQuality','usageAt']as const)if(tail[key]!==null&&tail[key]!==undefined)(out as any)[key]=tail[key];}
   if((tail.capacityAt??'')>=(prefix.capacityAt??'')&&tail.capacity!==null){out.capacity=tail.capacity;out.capacityAt=tail.capacityAt;}

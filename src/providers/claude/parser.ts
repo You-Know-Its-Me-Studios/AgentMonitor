@@ -17,6 +17,7 @@ export interface ClaudeState {
   tailObservedAt: string | null; nativeCost: { usd: number; modelNames: string[]; unknown: boolean } | null;
   taskEvidence?:TaskEvidenceState;
   contextClearedAt?:string;
+  agentError?:{at:string;message:string|null};
 }
 
 export function cleanText(value: unknown, length = 160): string | null {
@@ -112,6 +113,7 @@ export function reduceClaudeRecord(state: ClaudeState, record: any,meta?:RecordM
     if(at && typeof text==='string' && isContextSummary(text))signal(state,'summary',text,at,record.uuid??`summary:${at}`,meta,'context-summary',record.timestamp);
     const realPrompt = !!text && !isContextSummary(text) && record.isMeta !== true && !/^\s*(?:<|\/)/.test(text) && !(Array.isArray(content) && content.some((part:any)=>part.type==='tool_result'));
     if (realPrompt && at) {
+      if(!state.agentError||at>state.agentError.at)state.agentError={at,message:null};
       const id = nativeKey(record.uuid) ?? `user:${at}`;
       if (!state.turns[id]) { state.turns[id] = {startedAt:at,durationMs:null}; state.currentTurn=id; }
       state.firstPrompt ||= cleanText(text, 90);
@@ -121,6 +123,7 @@ export function reduceClaudeRecord(state: ClaudeState, record: any,meta?:RecordM
       if (part.type !== 'tool_result' || !nativeKey(part.tool_use_id)) continue;
       const tool = state.tools[part.tool_use_id]; if (!tool) continue;
       tool.outcome = part.is_error === true ? 'failure' : part.is_error === false ? 'success' : 'unknown';
+      if(at&&tool.outcome!=='unknown'&&(!state.agentError||at>=state.agentError.at))state.agentError={at,message:tool.outcome==='failure'?`${tool.name} failed`:null};
       tool.resultAt = at;
       tool.phase=record.toolUseResult?.interrupted===true?'interrupted':'finished';
       const result = record.toolUseResult;
@@ -138,6 +141,10 @@ export function reduceClaudeRecord(state: ClaudeState, record: any,meta?:RecordM
   }
   if (record.type === 'assistant') {
     const message=record.message; if (!message || typeof message !== 'object') return;
+    if(at&&(!state.agentError||at>=state.agentError.at)){
+      const errorText=record.isApiErrorMessage===true ? (Array.isArray(message.content)?message.content.filter((part:any)=>part.type==='text').map((part:any)=>part.text??'').join(' '):typeof message.content==='string'?message.content:'') : null;
+      state.agentError={at,message:record.isApiErrorMessage===true?cleanText(errorText,240)||'Claude reported an API error':null};
+    }
     if (typeof message.model === 'string' && !message.model.startsWith('<')) state.model=cleanText(message.model);
     const id=nativeKey(message.id);
     const hasStopReason=typeof message.stop_reason==='string';
@@ -177,6 +184,7 @@ export function sumClaudeUsage(responses: SavedResponse[]): Usage {
 }
 export function claudeSession(state: ClaudeState, namespace: string, now: string, complete = true): Session {
   const session=emptySession('claude',namespace,state.nativeId,state.source,now);
+  if(state.agentError?.message)session.agentError=metric(state.agentError.message,state.source,'native agent error','reported',undefined,state.agentError.at);
   session.name=state.explicitTitle??state.generatedTitle??state.summary??state.firstPrompt??session.name;
   session.nameSource=state.explicitTitle?'Explicit native title':state.generatedTitle?'Generated native title':state.summary?'Native summary':state.firstPrompt?'First user prompt':'Native ID';
   session.cwd=state.cwd;session.project=state.cwd?.split(/[\\/]/).filter(Boolean).at(-1)??null;session.branch=state.branch;
@@ -207,7 +215,7 @@ export function claudeSession(state: ClaudeState, namespace: string, now: string
     const summary=tools.get(tool.name)??{name:tool.name,category:category(tool.name),calls:0,succeeded:0,failed:0,unknown:0,durationMs:null,retries:null,pending:0};
     summary.calls++;if(tool.outcome==='success')summary.succeeded++;else if(tool.outcome==='failure')summary.failed++;else summary.unknown++;
     if(tool.at && tool.resultAt){const elapsed=Date.parse(tool.resultAt)-Date.parse(tool.at);if(elapsed>0)summary.durationMs=(summary.durationMs??0)+elapsed;}
-    if(tool.phase==='pending'&&!tool.resultAt)summary.pending=(summary.pending??0)+1;
+    if(tool.phase==='pending'&&!tool.resultAt&&(!state.currentTurn||!state.turns[state.currentTurn]||!tool.at||tool.at>=state.turns[state.currentTurn].startedAt))summary.pending=(summary.pending??0)+1;
     if(tool.phase==='in-flight')summary.inFlight=(summary.inFlight??0)+1;if(tool.phase==='interrupted')summary.interrupted=(summary.interrupted??0)+1;
     tools.set(tool.name,summary);
   }

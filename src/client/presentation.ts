@@ -21,17 +21,21 @@ export function runtimePresentation(session: Session, now: number, diagnostics: 
   const evidenceAt = eligibility.activityAt;
   const verified = eligibility.runtimeConfirmed;
   const openRecord = eligibility.lifecycle === 'open' ? 'The last recorded turn or task remains open. ' : '';
+  if (session.archived) return { label: 'Historical session', tone: 'historical', verified: false, evidenceAt, condition, detail: `Archived native history. Runtime unverified. ${condition}` };
+  if (session.agentError?.value) return { label: 'Agent error', tone: 'error', verified, evidenceAt: session.agentError.provenance.observedAt, condition, detail: `${session.agentError.value} ${condition}` };
+  if (session.state.value === 'error' && session.state.provenance.quality === 'reported') return { label: 'Agent error', tone: 'error', verified, evidenceAt: session.state.provenance.observedAt, condition, detail: condition };
+  const pendingQuestion = session.runtime.openTurn !== false && eligibility.lifecycle === 'open' && eligibility.sourceHealthy && session.tools.some(tool => /(?:^|[._/\s])(?:request_user_input(?:_async)?|AskUserQuestion)$/.test(tool.name) && ((tool.pending ?? 0) > 0 || (tool.inFlight ?? 0) > 0));
+  if (pendingQuestion) return { label: 'Waiting for input', tone: 'input', verified, evidenceAt, condition, detail: `A native question tool is awaiting a result. ${condition}` };
   if (verified) {
-    const names = { running: 'Running', idle: 'Idle', approval: 'Waiting for approval', input: 'Waiting for input', complete: 'Task complete' };
+    const names = { running: 'Running', idle: 'Idle', approval: 'Waiting for approval', input: 'Waiting for input', error: 'Agent error', complete: 'Task complete' };
     const state = session.state.value;
     const statusFresh = session.state.provenance.quality === 'reported';
     const label = statusFresh && state && state in names ? names[state as keyof typeof names] : 'Runtime loaded';
-    return { label, tone: statusFresh ? state ?? 'idle' : 'idle', verified: true, evidenceAt, condition, detail: `Loaded runtime confirmed. ${!statusFresh ? 'Current task status is awaiting a readable native response. ' : ''}${condition}` };
+    return { label, tone: statusFresh && state && state in names ? state === 'complete' ? 'idle' : state : session.runtime.openTurn === true ? 'running' : 'idle', verified: true, evidenceAt, condition, detail: `Loaded runtime confirmed. ${!statusFresh ? 'Current task status is awaiting a readable native response. ' : ''}${condition}` };
   }
   if (collection === 'unavailable') return { label: 'Collection unavailable', tone: 'unavailable', verified: false, evidenceAt, condition, detail: `Runtime unverified. ${openRecord}${condition}` };
   if (collection === 'stale') return { label: 'Collection stale', tone: 'stale', verified: false, evidenceAt, condition, detail: `Runtime unverified. ${openRecord}${condition}` };
-  if (session.archived) return { label: 'Historical session', tone: 'historical', verified: false, evidenceAt, condition, detail: `Archived native history. Runtime unverified. ${condition}` };
-  if (eligibility.lifecycle === 'open') return { label: session.runtime.openTurn === true ? 'Recorded turn open' : 'Task recorded active', tone: 'observed', verified: false, evidenceAt, condition, detail: `${eligibility.defaultReason} ${evidenceAt ? `Last source activity ${relativeAge(evidenceAt, now)}. ` : ''}${condition}` };
+  if (eligibility.lifecycle === 'open') return { label: session.runtime.openTurn === true ? 'Recorded turn open' : 'Task recorded active', tone: 'running', verified: false, evidenceAt, condition, detail: `${eligibility.defaultReason} ${evidenceAt ? `Last source activity ${relativeAge(evidenceAt, now)}. ` : ''}${condition}` };
   if (eligibility.lifecycle === 'historical') return { label: 'Historical session', tone: 'historical', verified: false, evidenceAt, condition, detail: `Persisted native history. Runtime unverified. ${condition}` };
   if (session.runtime.openTurn === false) return { label: 'Recorded turn closed', tone: 'historical', verified: false, evidenceAt, condition, detail: `The last native turn is recorded closed. Runtime unverified. ${condition}` };
   if (eligibility.lifecycle === 'complete' || eligibility.lifecycle === 'paused') return { label: eligibility.lifecycle === 'complete' ? 'Recorded task complete' : 'Recorded task paused', tone: 'historical', verified: false, evidenceAt, condition, detail: `Recorded task lifecycle: ${eligibility.lifecycle}. Runtime unverified. ${condition}` };

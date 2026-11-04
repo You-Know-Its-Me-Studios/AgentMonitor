@@ -20,7 +20,8 @@ export interface Session {
   startedAt: string | null; lastActivityAt: string | null;
   parentId: string | null; forkedFromId: string | null; archived: boolean;
   runtime: { reachable: boolean; loaded: boolean; serverReachable?: boolean; openTurn?: boolean; attachment: 'known' | 'unknown'; pid: number | null; processStartedAt: string | null; observedAt: string | null };
-  state: Metric<'running' | 'idle' | 'approval' | 'input' | 'complete' | 'historical' | 'unknown'>;
+  state: Metric<'running' | 'idle' | 'approval' | 'input' | 'error' | 'complete' | 'historical' | 'unknown'>;
+  agentError?: Metric<string>;
   latestActivity: string; usage: Metric<Usage>; turnUsage: Metric<Usage>;
   context: { used: Metric<number>; capacity: Metric<number>; capacityBasis?: 'model-limit' };
   allowanceIds: string[]; tools: ToolSummary[]; activities: Activity[]; trends: TrendPoint[];

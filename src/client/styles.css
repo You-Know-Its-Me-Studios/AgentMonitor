@@ -44,18 +44,17 @@ h1 { font-size: 25px; font-weight: 650; letter-spacing: -.45px; margin: 4px 0 8p
 .header-status > span:last-child { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .status { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #73839b3b; padding: 5px 9px; border-radius: 6px; font-size: 11px; color: #aebacc; background: #73839b0c; white-space: nowrap; }
 .status.state-running { color: #7aebb0; border-color: #65e7a135; background: #65e7a10c; }
-.status.state-idle { color: #70cce8; border-color: #5acbf235; background: #5acbf20c; }
+.status.state-idle, .status.state-complete { color: #aebacc; border-color: #73839b3b; background: #73839b0c; }
 .status.state-approval, .status.state-input { color: #edc674; border-color: #f3c86b35; background: #f3c86b0c; }
-.status.state-complete { color: #8bdbb0; border-color: #65e7a12b; background: #65e7a109; }
-.status.state-running .status-dot, .state-complete .status-dot, .tab-state.state-running, .tab-state.state-complete { background: var(--green); }
-.status.state-idle .status-dot, .tab-state.state-idle { background: var(--cyan); }
+.status.state-running .status-dot, .tab-state.state-running { background: var(--green); }
+.status.state-idle .status-dot, .status.state-complete .status-dot, .tab-state.state-idle, .tab-state.state-complete { background: #73839b; }
+.status.state-error, .status.state-unavailable { color: var(--red); border-color: #f179793b; background: #f179790c; }
+.status.state-error .status-dot, .status.state-unavailable .status-dot, .tab-state.state-error, .tab-state.state-unavailable { background: var(--red); }
 .status.state-approval .status-dot, .status.state-input .status-dot, .tab-state.state-approval, .tab-state.state-input { background: var(--amber); }
 .status.small { font-size: 9px; border: 0; padding: 0; background: none; gap: 5px; }
 .status.small .status-dot { height: 5px; width: 5px; }
-.status.state-observed { color: #8dc0df; border-color: #5acbf230; background: #5acbf208; }
-.status.state-observed .status-dot { background: #7ba7c3; }
-.status.state-stale, .status.state-unavailable { color: #dfbc7c; border-color: #f0c76735; background: #f0c76709; }
-.status.state-stale .status-dot, .status.state-unavailable .status-dot { background: var(--amber); }
+.status.state-observed, .status.state-stale { color: #aebacc; border-color: #73839b3b; background: #73839b0c; }
+.status.state-observed .status-dot, .status.state-stale .status-dot, .tab-state.state-observed, .tab-state.state-stale { background: #73839b; }
 .status-age { font-size: .9em; color: #8197ad; }
 .sessions-nav { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .sessions-tabs { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; overflow: visible; padding: 0 1px; flex: 1; }

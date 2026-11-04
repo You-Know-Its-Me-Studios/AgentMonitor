@@ -72,7 +72,8 @@ export function applyClaudeRuntime(session:Session,external:ExternalSession,now:
   session.startedAt ||= iso(external.startedAt);
   let state:NonNullable<Session['state']['value']>='unknown';
   if(external.state==='done')state='complete';
-  else if(external.state==='failed'||external.state==='stopped')state='complete';
+  else if(external.state==='failed')state='error';
+  else if(external.state==='stopped')state='complete';
   else if(external.status==='waiting')state=/permission|sandbox/i.test(external.waitingFor??'')?'approval':external.waitingFor==='input needed'?'input':'unknown';
   else if(external.state==='blocked')state='input';
   else if(external.status==='busy'||external.state==='working')state='running';
@@ -110,6 +111,7 @@ function mergeObservedTail(prefix:ClaudeState,tail:ClaudeState):ClaudeState {
   merged.startedAt=prefix.startedAt&&tail.startedAt?(prefix.startedAt<tail.startedAt?prefix.startedAt:tail.startedAt):prefix.startedAt??tail.startedAt;
   merged.firstPrompt??=tail.firstPrompt;merged.forkedFrom??=tail.forkedFrom;
   merged.contextClearedAt=[prefix.contextClearedAt,tail.contextClearedAt].filter((at):at is string=>Boolean(at)).sort().at(-1);
+  if(tail.agentError&&(!prefix.agentError||tail.agentError.at>=prefix.agentError.at))merged.agentError=tail.agentError;
   for(const [id,response]of Object.entries(tail.responses))if(!merged.responses[id]||response.final||!merged.responses[id].final)merged.responses[id]=response;
   for(const[id,tool]of Object.entries(tail.tools)){const previous=merged.tools[id];merged.tools[id]=previous?.resultAt && (!tool.resultAt||previous.resultAt>=tool.resultAt)?previous:tool;}
   for(const[id,turn]of Object.entries(tail.turns))merged.turns[id]=merged.turns[id]?.durationMs!==null&&merged.turns[id]?.durationMs!==undefined?merged.turns[id]:turn;
