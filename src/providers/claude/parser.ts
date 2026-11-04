@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { emptySession, emptyUsage, metric, sessionKey, type Activity, type Session, type ToolSummary, type Usage, type UsageSlice } from '../../shared/types.js';
 import type { RecordMeta } from '../../shared/adapter.js';
 import { normalizeTimestamp } from '../../shared/time.js';
-import { evidenceText, initialTaskEvidence, observeTaskEvidence, outputEvidence, taskEvidence, type TaskEvidenceState } from '../../server/task-evidence.js';
+import { evidenceText, isContextSummary, initialTaskEvidence, observeTaskEvidence, outputEvidence, taskEvidence, type TaskEvidenceState } from '../../server/task-evidence.js';
 
 type SavedResponse = { usage: Usage; at: string; turn: string | null; final: boolean; model: string | null;serviceTier?:string|null;cacheCreation5m?:number|null;cacheCreation1h?:number|null };
 type SavedTool = { name: string; at: string | null; resultAt: string | null; outcome: 'success' | 'failure' | 'unknown';phase?:'pending'|'in-flight'|'finished'|'interrupted'; editedFile: string | null; additions: number | null; deletions: number | null };
@@ -108,7 +108,8 @@ export function reduceClaudeRecord(state: ClaudeState, record: any,meta?:RecordM
   if (record.type === 'user') {
     const content = record.message?.content;
     const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter((part:any)=>part.type==='text').map((part:any)=>part.text).join(' ') : '';
-    const realPrompt = !!text && record.isMeta !== true && !/^\s*(?:<|\/)/.test(text) && !(Array.isArray(content) && content.some((part:any)=>part.type==='tool_result'));
+    if(at && typeof text==='string' && isContextSummary(text))signal(state,'summary',text,at,record.uuid??`summary:${at}`,meta,'context-summary',record.timestamp);
+    const realPrompt = !!text && !isContextSummary(text) && record.isMeta !== true && !/^\s*(?:<|\/)/.test(text) && !(Array.isArray(content) && content.some((part:any)=>part.type==='tool_result'));
     if (realPrompt && at) {
       const id = nativeKey(record.uuid) ?? `user:${at}`;
       if (!state.turns[id]) { state.turns[id] = {startedAt:at,durationMs:null}; state.currentTurn=id; }
@@ -197,9 +198,10 @@ export function claudeSession(state: ClaudeState, namespace: string, now: string
   session.activities=state.activities.slice().reverse();session.latestActivity=session.activities[0]?.label??'Persisted session';
   const tools=new Map<string,ToolSummary>();
   for(const tool of Object.values(state.tools)) {
-    const summary=tools.get(tool.name)??{name:tool.name,category:category(tool.name),calls:0,succeeded:0,failed:0,unknown:0,durationMs:null,retries:null};
+    const summary=tools.get(tool.name)??{name:tool.name,category:category(tool.name),calls:0,succeeded:0,failed:0,unknown:0,durationMs:null,retries:null,pending:0};
     summary.calls++;if(tool.outcome==='success')summary.succeeded++;else if(tool.outcome==='failure')summary.failed++;else summary.unknown++;
     if(tool.at && tool.resultAt){const elapsed=Date.parse(tool.resultAt)-Date.parse(tool.at);if(elapsed>0)summary.durationMs=(summary.durationMs??0)+elapsed;}
+    if(tool.phase==='pending'&&!tool.resultAt)summary.pending=(summary.pending??0)+1;
     if(tool.phase==='in-flight')summary.inFlight=(summary.inFlight??0)+1;if(tool.phase==='interrupted')summary.interrupted=(summary.interrupted??0)+1;
     tools.set(tool.name,summary);
   }

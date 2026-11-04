@@ -70,7 +70,8 @@ export default function TimingPanel({ session, observer, now, onObserver, select
     : next === null ? 'Waiting for an active task'
     : currentFailure ? `Retry ${next <= now ? 'due' : relativeAge(state?.nextRefreshAt, now)}`
     : next <= now ? 'Next update due' : `Next update ${relativeAge(state?.nextRefreshAt, now)}`;
-  const taskState = session.task?.state === 'complete' ? 'complete' : session.task?.state === 'paused' ? 'paused' : !priorTask ? assessment?.taskState : undefined;
+  const resumedWork = session.runtime.openTurn === true && session.task?.state === 'active' && ['complete','idle'].includes(assessment?.taskState ?? '');
+  const taskState = session.task?.state === 'complete' ? 'complete' : session.task?.state === 'paused' ? 'paused' : resumedWork ? 'active' : !priorTask ? assessment?.taskState : undefined;
   const finished = taskState === 'complete' || taskState === 'idle' || taskState === 'paused';
   const showRange = range.available && !priorTask && !finished && !legacyEstimate;
   const reportedTime = range.available ? range.minSeconds === range.maxSeconds ? elapsed(range.minSeconds! * 1000) : `${elapsed(range.minSeconds! * 1000)} – ${elapsed(range.maxSeconds! * 1000)}` : 'Not estimated';
@@ -78,7 +79,7 @@ export default function TimingPanel({ session, observer, now, onObserver, select
     : showRange ? reportedTime
     : state?.inProgress ? 'Assessing…' : state?.queued ? 'Queued' : currentFailure || selectionError ? 'Unavailable' : 'Awaiting estimate';
   const brief = (value: string, limit: number) => value.length <= limit ? value : `${value.slice(0, limit).replace(/\s+\S*$/, '')}…`;
-  const stage = legacyEstimate ? finished ? `Task ${taskState}` : 'Awaiting a CLI subagent reply' : !priorTask && assessment ? assessment.stage : assessmentStatus;
+  const stage = legacyEstimate ? finished ? `Task ${taskState}` : 'Awaiting a CLI subagent reply' : resumedWork ? 'Work resumed · updating estimate' : !priorTask && assessment ? assessment.stage : assessmentStatus;
   const blocker = !priorTask && !finished && !legacyEstimate ? assessment?.blockers[0] : null;
   const feedback = <>{requestError && <p className="observer-error" role="alert">{requestError}</p>}{saved && <p className="observer-saved" role="status">Settings saved.</p>}{userAction && <p className="observer-error" role="alert">{userAction}</p>}</>;
   return <>

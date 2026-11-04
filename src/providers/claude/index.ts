@@ -78,6 +78,10 @@ export function applyClaudeRuntime(session:Session,external:ExternalSession,now:
   else if(external.status==='idle')state='idle';
   const reason=external.waitingFor?`Native process is waiting for ${cleanText(external.waitingFor,200)}; ${state==='unknown'?'the exact task state is unavailable':'this waiting condition is explicitly reported'}.`:external.state?`Native task state is ${external.state}; ${processAlive?'its process remains live':'no live process was reported'}.`:external.status==='idle'?'Native listing reports an idle live process; idle does not mean the conversation or process exited.':external.status==='busy'?'Native listing reports a busy live process.':'Native listing did not report a recognized process or task state.';
   session.state=metric(state,source,'task state; process liveness is separate','reported',reason,now);
+  if(openTurn===true && session.task?.state==='complete'){
+    session.task.state='active';
+    session.task.coverage+=' Native listing reports ongoing work after the last recorded final response; that response does not establish current completion.';
+  }
   if(external.waitingFor)session.latestActivity=cleanText(external.waitingFor)??session.latestActivity;
   else if(external.state==='failed')session.latestActivity='Task ended with an error';
   else if(external.state==='stopped')session.latestActivity='Task stopped';

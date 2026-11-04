@@ -33,6 +33,7 @@ function objective(text:string):string {
 }
 function userKind(text:string,prior:EvidenceItem|null,reportedComplete:boolean):'new'|'correction'|'status'|'pause' {
   const flat=text.replace(/^#{1,6}\s*/,'').trim();
+  if(!prior && /^(?:continue|resume|go on|keep going|yes)[.!\s]*$/i.test(flat))return'status';
   if(/^(?:stop|pause|hold on|don.t (?:start|launch|run)|do not (?:start|launch|run))/i.test(flat))return'pause';
   if(/^(?:what(?:.s| is| are)|how(?:.s| is| are)|any (?:update|progress)|status\b|where (?:are we|is this)|are you (?:done|finished)|is it (?:done|ready)|can you (?:give|show).{0,30}(?:status|update))/i.test(flat)&&flat.length<500&&!/\b(?:must|instead|please (?:fix|change)|implement|add|remove)\b/i.test(flat))return'status';
   if(!prior)return'new';
@@ -50,9 +51,17 @@ function userKind(text:string,prior:EvidenceItem|null,reportedComplete:boolean):
   return'correction';
 }
 function chronological(a:EvidenceItem,b:EvidenceItem){return a.occurredAt.localeCompare(b.occurredAt)||a.id.localeCompare(b.id);}
+export function isContextSummary(text:string):boolean {return /^This session is being continued from a previous conversation that ran out of context\./i.test(text.trim());}
+function normalizedEvents(events:EvidenceItem[]):EvidenceItem[] {
+  // Older cached Claude reducers treated automatic compaction summaries as new
+  // user requests. Reinterpret those records without clearing ingestion history.
+  const summaries=new Set(events.filter(e=>e.status==='user-input'&&isContextSummary(e.text)).map(e=>e.id.slice(0,e.id.lastIndexOf(':'))));
+  return events.map(e=>summaries.has(e.id.slice(0,e.id.lastIndexOf(':')))?{...e,kind:'summary',status:'context-summary'}:e);
+}
+function resumesWork(event:EvidenceItem):boolean {return event.kind==='tool'&&['pending','in-flight'].includes(event.status??'')||event.kind==='progress'&&event.status==='public-update';}
 function bounded(events:EvidenceItem[]):{events:EvidenceItem[];omitted:boolean} {
-  const sorted=events.slice().sort(chronological);let request:EvidenceItem|null=null,lastNew=0,complete=false;
-  for(let i=0;i<sorted.length;i++){const e=sorted[i];if(e.status==='user-input'){const kind=userKind(e.text,request,complete);if(kind==='new'){request=e;lastNew=i;complete=false;}else if(kind==='pause')complete=true;}else if(e.status==='native-turn-complete'||e.status==='native-final'||e.kind==='summary'&&['public-final','final_answer'].includes(e.status??'')&&/\b(?:implemented|completed|finished|done)\b/i.test(e.text)&&!/(?:not|never|isn.t|haven.t|didn.t)\s+(?:yet\s+)?(?:complete|done|finished|implemented)/i.test(e.text))complete=true;}
+  const sorted=normalizedEvents(events).sort(chronological);let request:EvidenceItem|null=null,lastNew=0,complete=false;
+  for(let i=0;i<sorted.length;i++){const e=sorted[i];if(e.status==='user-input'){const kind=userKind(e.text,request,complete);if(kind==='new'){request=e;lastNew=i;complete=false;}else if(kind==='pause')complete=true;}else if(e.status==='native-turn-complete'||e.status==='native-final'||e.kind==='summary'&&['public-final','final_answer'].includes(e.status??'')&&/\b(?:implemented|completed|finished|done)\b/i.test(e.text)&&!/(?:not|never|isn.t|haven.t|didn.t)\s+(?:yet\s+)?(?:complete|done|finished|implemented)/i.test(e.text))complete=true;else if(resumesWork(e))complete=false;}
   const current=sorted.filter((event,index)=>index>=lastNew||event.occurredAt===request?.occurredAt),priority=current.filter(e=>e.id===request?.id||e.status==='user-input'||e.status?.startsWith('user-input-continuation:')||e.kind==='plan'||e.kind==='blocker');
   const retained=new Map<string,EvidenceItem>();let bytes=0;
   const keep=(event:EvidenceItem)=>{if(retained.has(event.id))return;if(bytes+event.text.length>56000&&retained.size>0)return;retained.set(event.id,event);bytes+=event.text.length;};
@@ -77,14 +86,14 @@ export function mergeTaskEvidence(a:TaskEvidenceState|undefined,b:TaskEvidenceSt
 }
 export function taskEvidence(state:TaskEvidenceState|undefined,coverage:string):TaskEvidence|undefined {
   if(!state?.events.length)return undefined;
-  const sorted=state.events.slice().sort(chronological);let primary:EvidenceItem|null=null,start=0,revision=1,paused=false,reportedComplete=false,completed=false;
+  const sorted=normalizedEvents(state.events).sort(chronological);let primary:EvidenceItem|null=null,start=0,revision=1,paused=false,reportedComplete=false,completed=false;
   const mapped:EvidenceItem[]=[];
   for(const event of sorted){
     if(event.status==='user-input'){
       const kind=userKind(event.text,primary,reportedComplete);
       if(kind==='new'){primary=event;start=mapped.length;revision=1;paused=false;reportedComplete=false;completed=false;mapped.push({...event,kind:'request'});}
       else {if(kind!=='status'){revision++;paused=kind==='pause';completed=false;if(paused)reportedComplete=true;}mapped.push({...event,kind:kind==='status'?'progress':'correction',status:kind==='status'?'user-status-question':kind==='pause'?'user-paused':'user-correction'});}
-    }else{mapped.push(event);if(event.status==='native-turn-complete'||event.status==='native-final'){completed=true;reportedComplete=true;}else if(event.kind==='summary'&&['public-final','final_answer'].includes(event.status??'')&&/\b(?:implemented|completed|finished|done)\b/i.test(event.text)&&!/(?:not|never|isn.t|haven.t|didn.t)\s+(?:yet\s+)?(?:complete|done|finished|implemented)/i.test(event.text))reportedComplete=true;}
+    }else{mapped.push(event);if(event.status==='native-turn-complete'||event.status==='native-final'){completed=true;reportedComplete=true;}else if(resumesWork(event)){completed=false;reportedComplete=false;}else if(event.kind==='summary'&&['public-final','final_answer'].includes(event.status??'')&&/\b(?:implemented|completed|finished|done)\b/i.test(event.text)&&!/(?:not|never|isn.t|haven.t|didn.t)\s+(?:yet\s+)?(?:complete|done|finished|implemented)/i.test(event.text))reportedComplete=true;}
   }
   const current=mapped.filter((event,index)=>index>=start||event.occurredAt===primary?.occurredAt),first=primary??current[0],last=current.at(-1)!;
   return{id:primary?`task:${hash(primary.id)}`:`task:unrecovered:${hash(state.nativeId)}`,revision,objective:primary?objective(primary.text):'Current task instructions have not been recovered',startedAt:first.occurredAt,lastActivityAt:last.occurredAt,turnId:[...current].reverse().find(event=>event.turnId)?.turnId??null,state:primary?(paused?'paused':completed?'complete':'active'):'unknown',items:current,coverage:`${coverage}${state.omitted?' Earlier low-priority public evidence was condensed.':''}${primary?' Task boundaries follow explicit user requests; completion is reported by native turn/final evidence, not independently verified.':' Task instructions are unavailable; further source backfill is required.'}`,instructionsRecovered:!!primary};
