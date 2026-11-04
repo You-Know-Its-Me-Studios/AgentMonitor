@@ -57,18 +57,18 @@ h1 { font-size: 25px; font-weight: 650; letter-spacing: -.45px; margin: 4px 0 8p
 .status.state-stale, .status.state-unavailable { color: #dfbc7c; border-color: #f0c76735; background: #f0c76709; }
 .status.state-stale .status-dot, .status.state-unavailable .status-dot { background: var(--amber); }
 .status-age { font-size: .9em; color: #8197ad; }
-.sessions-nav { display: flex; align-items: flex-start; gap: 10px; min-width: 0; border-bottom: 1px solid var(--border); }
+.sessions-nav { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .sessions-tabs { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; overflow: visible; padding: 0 1px; flex: 1; }
-.session-tab { position: relative; display: inline-flex; align-items: center; gap: 8px; padding: 14px 13px; color: #8e9bb0; background: transparent; min-width: min(140px, 100%); max-width: 260px; flex: 1 1 180px; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; font-size: 11px; }
+.session-tab { position: relative; display: inline-flex; align-items: center; gap: 8px; padding: 14px 13px; color: #8e9bb0; background: transparent; min-width: min(140px, 100%); max-width: 260px; flex: 1 1 180px; border: 1px solid transparent; border-radius: 7px; font-size: 11px; }
 .session-tab > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-tab:hover { color: var(--text); background: #ffffff03; }
 .session-tab.selected { color: #ebf1f9; background: linear-gradient(0deg, #65e7a108, transparent); border-color: var(--border); }
-.session-tab.selected::after { content: ''; position: absolute; bottom: -1px; left: 10px; right: 10px; height: 2px; background: var(--green); border-radius: 2px; }
+.session-tab.selected::after { content: ''; position: absolute; bottom: 0; left: 12px; right: 12px; height: 2px; background: var(--green); border-radius: 2px; }
 .session-tab.selected.claude::after { background: var(--claude); }
 .session-tab.codex > svg { color: #65e7a1ad; }
 .session-tab.claude > svg { color: #dfa981c4; }
 .tab-state { width: 5px; height: 5px; flex-shrink: 0; border-radius: 100%; background: #536275; margin-left: 3px; }
-.all-sessions { align-self: flex-start; display: flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; font-size: 10px; color: #acbacb; padding: 9px 10px; margin: 0 0 8px; background: #1b2533; border: 1px solid var(--border); border-radius: 6px; }
+.all-sessions { align-self: flex-start; display: flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; font-size: 10px; color: #acbacb; padding: 9px 10px; margin: 0; background: #1b2533; border: 1px solid var(--border); border-radius: 6px; }
 .session-counts { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #7f8da2; padding: 14px 1px 17px; font-size: 10px; }
 .session-counts > span { display: flex; align-items: center; gap: 6px; }
 .session-counts .status-dot { width: 5px; height: 5px; }
@@ -537,7 +537,7 @@ footer { padding: 16px 1px; font-size: 11px; }
   .header-status { width: 100%; padding: 0; flex-direction: row; justify-content: space-between; align-items: center; flex-wrap: wrap; }
   .sessions-nav { flex-wrap: wrap; }
   .sessions-tabs { flex-basis: 100%; }
-  .all-sessions { margin: 0 0 8px auto; }
+  .all-sessions { margin-left: auto; }
   .session-counts > span { flex-wrap: wrap; }
   .card { padding: 16px; }
   .context-overview { gap: 24px; }
