@@ -28,6 +28,9 @@ collector.current.build = build;
 const observer = new ObserverService(store, createObserverWorker(workspace));
 observer.on('change', state => { try { collector.setObserver(state); } catch (error) { logError('Observer snapshot delivery', error); } });
 collector.on('snapshot', snapshot => { try { observer.observe(snapshot); } catch (error) { logError('Observer evidence delivery', error); } });
+// Bootstrap and selection must see the same cached session identities. Collection
+// is still initializing, so observe() cannot schedule an assessment from this cache.
+observer.observe(collector.current);
 const clientDir = path.join(workspace, 'dist/client');
 let app: Awaited<ReturnType<typeof createApp>>;
 let closing = false;

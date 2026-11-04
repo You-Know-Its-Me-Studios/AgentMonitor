@@ -305,14 +305,33 @@ export default function App() {
   useEffect(() => { if (selectedId) { try { localStorage.setItem(SELECTION_KEY, selectedId); } catch { /* Storage may be disabled by browser policy. */ } } }, [selectedId]);
   useEffect(() => { document.title = selected ? selected.name : 'Agent Monitor'; }, [selected?.name]);
   const observerReady = Boolean(snapshot.observer);
+  const selectableSessionId = selected && !snapshot.collecting ? selected.id : null;
   useEffect(() => {
-    if (!selectedId || !observerReady) return;
+    if (!selectableSessionId || !observerReady) return;
     let active = true;
+    let retryTimer: number | undefined;
+    let failures = 0;
     setSelectionError(null);
-    void observerRequest('selection', { sessionId: selectedId }).then(value => { if (active) updateObserver(value); }).catch(error => { if (active) setSelectionError(error instanceof Error ? error.message : 'Observer selection failed.'); });
-    return () => { active = false; };
-    // Selection follows identity, never a stream update or native rename.
-  }, [selectedId, observerReady, snapshot.instanceId]);
+    const select = async () => {
+      try {
+        const value = await observerRequest('selection', { sessionId: selectableSessionId });
+        if (active) { setSelectionError(null); updateObserver(value); }
+      } catch (error) {
+        if (!active) return;
+        const message = error instanceof Error ? error.message : 'Observer selection failed.';
+        failures++;
+        setSelectionError(`${message}${failures <= 3 ? ' Retrying selection automatically.' : ''}`);
+        if (failures <= 3) retryTimer = window.setTimeout(() => { void select(); }, 1500 * 2 ** (failures - 1));
+      }
+    };
+    void select();
+    return () => { active = false; window.clearTimeout(retryTimer); };
+    // Wait for a collected identity, retry transient startup failures, and cancel
+    // obsolete retries on tab switches or server replacement.
+  }, [selectableSessionId, observerReady, snapshot.instanceId]);
+  useEffect(() => {
+    if (selectedId && snapshot.observer?.selectedSessionId === selectedId) setSelectionError(null);
+  }, [selectedId, snapshot.observer?.selectedSessionId]);
   useEffect(() => { const key = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') { setHistoryOpen(false); } }; document.addEventListener('keydown', key); return () => document.removeEventListener('keydown', key); }, []);
   const tabs = limitSessionTabs(sessionTabs(mainSessions, selectedId, now), selectedId, tabLimit);
   const children = selected ? snapshot.sessions.filter(s => s.parentId === selected.id || (s.parentId === selected.nativeId && s.namespace === selected.namespace && s.provider === selected.provider)) : [];

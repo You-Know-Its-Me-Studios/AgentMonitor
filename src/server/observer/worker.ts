@@ -8,7 +8,7 @@ import { defaultObserverSettings, type ObserverCapabilities, type ObserverInput,
 import { redact } from '../privacy.js';
 import { assessmentSchema } from './schema.js';
 import { createObserverProcessRunner, ObserverWorkerError, type ObserverProcessRunner } from './process.js';
-import { cachedCodexModels, claudeArguments, codexArguments, executableFor, modelCatalog, parseClaudeResult, parseCodexResult, safeProviderDiagnostic, type ProviderRuntime } from './worker-providers.js';
+import { cachedCodexModels, claudeArguments, codexArguments, executableFor, modelCatalog, observerInstructions, parseClaudeResult, parseCodexResult, safeProviderDiagnostic, type ProviderRuntime } from './worker-providers.js';
 export { ObserverWorkerError } from './process.js';
 
 export interface ObserverWorkerOptions { runner?: ObserverProcessRunner; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform }
@@ -59,6 +59,7 @@ export function createObserverWorker(workspace: string, options: ObserverWorkerO
         const probeSettings = {...defaultObserverSettings,model,effort:runtime.models.get(model)![0]};
         const probeDirectory = await fs.mkdtemp(path.join(cwd,'config-probe-'));
         try {
+          await fs.writeFile(path.join(probeDirectory,'observer-instructions.md'),observerInstructions,{mode:0o600,flag:'wx'});
           const check = async (names: string[]) => runner.run({...base,...command,args:codexArguments({...runtime,mcpNames:names},probeSettings,model,path.join(probeDirectory,'schema.json'),path.join(probeDirectory,'output.json'),probeDirectory),input:''});
           const configValid = (response: {code:number|null;stdout:string;stderr:string}) => response.code === 1 && !response.stdout.trim() && /(?:^|\r?\n)No prompt provided via stdin\.\s*(?:$|\r?\n)/.test(response.stderr);
           // Source-verified exec order: configuration loads before the forced empty stdin guard;
@@ -113,6 +114,9 @@ export function createObserverWorker(workspace: string, options: ObserverWorkerO
       const directory = await fs.mkdtemp(path.join(cwd,'run-')); const schemaPath = path.join(directory,'assessment.schema.json'), outputPath = path.join(directory,'assessment.json');
       try {
         await fs.writeFile(schemaPath,JSON.stringify(assessmentSchema),{mode:0o600,flag:'wx'});
+        // Replace the coding-agent base instructions for this isolated assessment
+        // only; never edit the user's CLI configuration or monitored conversation.
+        if (settings.provider === 'codex') await fs.writeFile(path.join(directory,'observer-instructions.md'),observerInstructions,{mode:0o600,flag:'wx'});
         const args = settings.provider === 'codex' ? codexArguments(runtime,settings,model,schemaPath,outputPath,directory) : claudeArguments(runtime,settings,model,assessmentSchema);
         const result = await runner.run({executable:runtime.executable,args,cwd:directory,env,input:prompt,timeoutMs:settings.timeoutSeconds*1000,signal,maxOutputBytes:4*1024*1024});
         const evidenceIds = input.evidence.map(e => e.id); let final: string | null = null;

@@ -3,9 +3,11 @@ import { promises as fs, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { ObserverFailure } from '../../shared/observer.js';
+import type { Usage } from '../../shared/types.js';
 import { logError } from '../errors.js';
 
 export class ObserverWorkerError extends Error {
+  usage: Usage | null = null;
   constructor(readonly code: ObserverFailure['code'], message: string) { super(message); this.name = 'ObserverWorkerError'; }
 }
 export interface ObserverCommand { executable: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; input: string; timeoutMs: number; signal?: AbortSignal; maxOutputBytes?: number; fileStdio?: boolean }

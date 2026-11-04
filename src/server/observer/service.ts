@@ -8,6 +8,7 @@ import { validateAssessment } from './schema.js';
 import { sessionEligibility } from '../../shared/lifecycle.js';
 import { compareTimestamps,epochMilliseconds } from '../../shared/time.js';
 import { logError } from '../errors.js';
+import { ObserverWorkerError } from './process.js';
 
 interface Persisted { settings: ObserverSettings; selectedSessionId: string | null; sessions: Record<string, ObserverSessionState>; revisions: Record<string, number> }
 interface Running { taskId: string; taskRevision: number; requestRevision: number; abort: AbortController; promise: Promise<void> }
@@ -233,6 +234,12 @@ export class ObserverService extends EventEmitter {
         state.assessment = sanitize(assessment); state.failure = null; this.failures.delete(session.id);
         this.store.writeState(`observer-assessment:${assessment.id}`, state.assessment);
       } catch (error) {
+        // A rejected result can still carry reported provider consumption. Never
+        // include it in the monitored conversation's totals or treat it as zero.
+        if (error instanceof ObserverWorkerError && error.usage) {
+          const latestState = this.data.sessions[session.id];
+          latestState.usage = addUsage(latestState.usage, error.usage);
+        }
         if (abort.signal.aborted) return;
         logError('Observer worker', error);
         const code = (error as { code?: string })?.code;
