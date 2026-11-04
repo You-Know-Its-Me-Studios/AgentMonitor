@@ -459,8 +459,7 @@ h1 { font-size: 24px; margin: 3px 0 5px; }
 .metric-label { font-size: 12px; color: #9cb2c9; }
 .eta-value { display: block; font-size: clamp(27px, 2.3vw, 36px); font-weight: 600; letter-spacing: -.7px; line-height: 1.2; margin-top: 6px; color: #9de9c2; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .eta-condition { font-size: 25px; color: #c2d2e3; }
-.eta-confidence { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: 12px; color: #9babc2; }
-.eta-confidence > span { color: #b6a2db; text-transform: capitalize; }
+.eta-assessed { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: 12px; color: #9babc2; }
 .eta-notice { font-size: 12px; color: var(--amber); line-height: 1.5; margin: 8px 0 0; }
 .task-elapsed { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 8px 0 6px; }
 .task-elapsed > span { font-size: 12px; color: #9cb2c9; }
